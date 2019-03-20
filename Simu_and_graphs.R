@@ -12,8 +12,8 @@ setwd(paste('C:/Users/',user,"/pcloud local/0_These/Github/SamplingEffort/",sep=
 source('_functions.R')
 
 SaveModels = T
-expeName = "19_03_20 optimize regularization"
-runName = "_RUN_Mar 2019_3"
+expeName = "19_03_20 test"
+runName = "_RUN_Mar 2019_4"
 SaveDir = paste("D:/LOF data/",expeName,sep="")
 
 setwd(SaveDir)
@@ -107,11 +107,11 @@ f= "I( axe3 ) + I( axe3 ^2)"
 
 ## Define the experimental planning into "Sched" data.frame
 
-nrep = 10 # Number of repetitions per (sampling,species) model configurations
+nrep = 1 # Number of repetitions per (sampling,species) model configurations
 # True effort
 trueEffort = as.character(
   expand.grid(1:nrep,
-              c('mid','cutNice','cutHurts','SigmoFast'))[,2])  
+              c('mid','cutNice','cutHurts'))[,2])  
 # Pool of virtual species to simulate
 spGroup = c( rep('Bisp', length(trueEffort)) )  
 # Class of estimators for sampling effort
