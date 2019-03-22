@@ -291,14 +291,25 @@ get_hash = function(tab,breaks){
 # (i) Complete occurrences data.frame with given background points
 # duplicated into all species
 # (ii) compute weights and y
-bind.background.pts = function(occ,bg,Bias_killer=100){
+bind.background.pts = function(occ,bg,factorCols=NULL,Bias_killer=100,equalSizeCells=T){
   occ = occ[complete.cases(occ),]
   occ$taxa = factor(occ$taxa)
   taxas = levels(occ$taxa)
   bg$taxa = factor(NA,levels=taxas)
   n_0=dim(bg)[1]
   # Attribute likelihood weights
-  bg$w = (Bias_killer-1) / (n_0*Bias_killer)
+  q_hashes = unique(c(occ$q_hash,bg$q_hash))
+  if(equalSizeCells){
+    for(qh in q_hashes){
+      inCell = bg$q_hash==qh
+      nInCell = sum(inCell)
+      bg$w[inCell] = (Bias_killer-1) / (n_0*Bias_killer*nInCell)
+    }
+  }else{
+    print('Error: Non-equal cell size not implemented yet')
+    return(NULL)
+  }
+  
   # background output value is zero
   bg$pseudo_y=0
   n=NULL
@@ -312,9 +323,54 @@ bind.background.pts = function(occ,bg,Bias_killer=100){
   }
   # Bind occurrences and background points
   # with a repetition of background points per species 
-  for(e in 1:length(taxas)){bg$taxa=taxas[e];occ=rbind(occ,bg)}
+  for(e in 1:length(taxas)){
+    bg$taxa=taxas[e]
+    occ=rbindlist(list(occ,bg))
+    if(e/20==round(e/20)){
+      flush.console()
+      cat('     \r    Process...',100*e/length(taxas),'%       \r')
+    }
+  }
+  if(length(factorCols)>0){
+    for(c in factorCols){
+      eval(parse(text=paste('occ$',c,'=factor(occ$',c,')',sep="")))
+    }
+  }
   return(occ)
 }
+
+
+### Low memory + scalable wrapper of sparse.model.matrix 
+memFree.sparse.model.matrix= function(matrixFormu,Data,band=50000){
+  quo = dim(Data)[1] %/% band
+  res = dim(Data)[1] %% band
+  npass = quo+as.numeric(res>0)
+  store = data.frame(is=NA,js=NA,xs= NA)
+  store = store[-1,]
+  deb= Sys.time()
+  for(i in 1:npass){
+    if(i==npass & res>0){
+      tmp = Data[(1+(i-1)*band):dim(Data)[1],,drop=F]
+    }else{
+      tmp = Data[(1+(i-1)*band):(i*band),,drop=F]
+    }
+    
+    mTmp = sparse.model.matrix(matrixFormu,tmp)
+    mTmp = as(mTmp, "dgTMatrix")
+    store = rbindlist(list(store,data.frame(is=mTmp@i,js=mTmp@j,xs=mTmp@x)))
+    dur = Sys.time()-deb
+    gc(reset=T)
+    if(i/5==round(i/5)){
+      flush.console()
+      cat('\r     Process...',100*i/npass,' time elapsed:',dur,attr(dur,'units'),'       \r')
+    }
+  }
+  BGf = sparseMatrix(i=store$is+1,j=store$js+1,x=store$xs,dims=c(dim(Data)[1],dim(mTmp)[2]))
+  colnames(BGf) = colnames(mTmp)
+  gc(reset=T)
+  return(BGf)
+}
+
 
 ### Fit LOF (GLMNET version)
 # fit LOF model parameters to data with the glmnet package
@@ -337,7 +393,7 @@ lof_glmnet=function(data,y,occupationString,weights=NULL,lambdaMinRatio=NULL,nla
     matrixFormu = paste(' ~ q_hash + ',occupationString)
   }
   matrixFormu = as.formula(matrixFormu)
-  SparseDes = sparse.model.matrix(matrixFormu,data)
+  SparseDes = memFree.sparse.model.matrix(matrixFormu,data,band=100000)
   taxaItc= intersect( grep('taxa',colnames(SparseDes)) , grep('I(.*)',colnames(SparseDes),invert=T))
   
   # GLMNET formula
@@ -372,7 +428,7 @@ lof_glmnet=function(data,y,occupationString,weights=NULL,lambdaMinRatio=NULL,nla
   nQ = dim(Contr)[1]
   coefo = lof.mod$beta[,dim(lof.mod$beta)[2]]
   coefo_qc = coefo[regexpr('q_hash',names(coefo))>0]
-  orderedIdx = sapply(1:nQi,function(k) which(grepl(paste('q_hash',k,sep=""),names(coefo_qc))) )
+  orderedIdx = sapply(1:nQi,function(k) which(paste('q_hash',k,sep="")==names(coefo_qc)) )
   coefo_qc=coefo_qc[orderedIdx]
   Qnames = rownames(Contr)
   coefo_q = rep(NA,nQ)
@@ -414,5 +470,332 @@ cutHurts = function(x){
 # Cuts Nice
 cutNice = function(x){
   1+ 3 * as.numeric(x>=(-4) & x<(-3)) +  7*as.numeric(x>=0 & x<1) +  2*as.numeric(x>=3 & x<4)
+}
+
+#####
+# Functions for real data experiment
+#####
+
+# catalogue des variables environnementales disponibles
+load_variables=function(){
+  variables=list()
+  # variables extraites par la méthode 1 :
+  # directement depuis le raster
+  # sources données :  WorldClim 1.4,Chelsea 1.1, ETP , SRTM2010
+  variables[[1]] = c( 
+    "etp",   
+    "bio_1",               "bio_2",               "bio_3",               "bio_4",               "bio_5",              
+    "bio_6",               "bio_7",               "bio_8",               "bio_9",               "bio_10",             
+    "bio_11",              "bio_12",              "bio_13",              "bio_14",              "bio_15",             
+    "bio_16",              "bio_17",              "bio_18",              "bio_19",              
+    "chbio_1",             "chbio_2",             "chbio_3",             "chbio_4",             "chbio_5",
+    "chbio_6",             "chbio_7",             "chbio_8",             "chbio_9",             "chbio_10", 
+    "chbio_11",            "chbio_12",            "chbio_13",            "chbio_14",            "chbio_15",
+    "chbio_16",            "chbio_17",            "chbio_18",            "chbio_19",
+    "alti" ,               "slope",               "shade",               "droute_fast",         "dmer_fast",
+    "proxi_eau_fast",
+    paste('axe',1:10,sep=""))
+  # variables extraites par la méthode 2 : 
+  # projection des coordonnées sur le système européen, 
+  # substitution des valeurs du raster selon la règle dictée par attrib.csv 
+  # gestion particulière de "text"
+  # sources données :  ESDB v2.0 => PTRDB
+  variables[[2]] =  c("awc_top",            "bs_top",              "cec_top",             "crusting",            "dgh",                
+                      "dimp", "erodi",     "oc_top", "pd_top",   "vs", "text" ,'text_orga','text_autre','text_roche','text_noinfo')
+  # variables extraites par la méthode 3 : 
+  # projection des coordonnées sur le système français IGN
+  # sources données :  BD Carthage
+  variables[[3]] =  c("deau","dmer","proxi_eau")
+  # variables extraites par la méthode 4 : 
+  # sources données :  ROUTE500, IGN
+  variables[[4]] = c("droute")
+  # variables extraites par la méthode 5 :
+  # extraction directe depuis le raster
+  # création de variables binaires, une par catégorie.
+  # sources données :  CLC2012
+  variables[[5]] = c(
+    "discont_ur_fab",      "indus",               "road_or_rail",        "port",                "airport",            
+    "mine",                "dump",                "construction_site",   "green_urb",           "sport_facilit",      
+    "arable_nonirrig",     "arable_irrig",        "rice",                "vine",                "fruit",              
+    "olive",               "pasture",             "annual_crop",         "complex_culti",       "agri_and_nat",       
+    "agroforestry",        "brl_forest",          "coni_forest",         "mixed_forest",        "nat_grass",          
+    "moors_heat",          "sclero_veg",          "transi_wood",         "sand",                "rock",               
+    "sparse",              "burnt",               "snow",                "marsh",               "peat",             
+    "salt_marsh",          "saline",              "intertid_flat",       "wat_course",          "wat_body",           
+    "coast_lag",           "estua",               "ocean",               "cont_urb_fab" )
+  # variable extraite par la méthode 6 : 
+  # extraction directe depuis le raster CLC dont les coordonnées sont en système : 
+  # "+proj=laea +lat_0=52 +lon_0=10 +x_0=4321000 +y_0=3210000 +ellps=GRS80 +units=m"
+  variables[[6]]=c('clc')
+  return(variables)
+}
+
+# attribution des variables environnementales aux occurrences à partir d'un data.frame
+# où chaque ligne est une occurrence et sont présentes les colonnes "Longitude" et "Latitude" au format WGS84
+get_variables = function(variables,table,dpath='C:/Users/Christophe/hubiC/Documents/0_These/data/',d_NA=2000,fix=T){
+  # variables : vecteur de chaînes de caractères, contient les variables à attribuer à chaque occurence selon  
+  # la nomenclature fournie par load_variables
+  
+  # table : data.frame, au moins deux colonnes "Longitude" et "Latitude" (en système de coordonnées WGS84)
+  # chaque ligne représente une occurence 
+  
+  # dpath : chaîne de caractères, adresse du repertoire contenant le dossier "0_mydata" 
+  
+  # d_NA : numeric , nombre de mètres maximal pour lequel on va chercher la valeur la plus proche non NA.
+  method = load_variables()
+  loaded_data = list(clc=0,eau=0,cours_eau=0,rd=0,text=0)
+  for (var in variables){
+    if(var%in%method[[1]]){
+      print(var)
+      # meth1
+      r = raster(paste(dpath,'0_mydata/',var,'/',var,'.tif',sep=""))
+      
+      # extraction des valeurs des occcurrences
+      print('extracting values...')
+      
+      table[,var] = extract( r, data.frame(table$Longitude,table$Latitude) )
+      #command = "extract( r, data.frame(table$Longitude,table$Latitude) )"
+      #eval(parse(text=paste('table$',var,'=',command,sep="")))
+      
+      if(fix & sum(is.na(table[,var]))>0){
+        # correction des occurences cotières à une tolérance de 2km
+        print('correcting values...')
+        #vals[is.na(vals)] = get_value_fromXY(r, table[is.na(vals),] , tol_NA = T , d_to_closest_if_NA = 2000 )
+        if (var =="dmer_fast"){
+          #vals[is.na(vals)] = 32767
+          table[is.na(table[,var]),var] = 32767
+        }else{
+          #vals[is.na(vals)] = get_value_fromXY_par(r,table[is.na(vals),],d_to_closest_if_NA = d_NA)
+          table[is.na(table[,var]),var] = get_value_fromXY_par(r,table[is.na(table[,var]),],d_to_closest_if_NA = d_NA)
+        }
+      }
+      #eval(parse(text=paste('table$',var,'=vals',sep="")))
+      rm(r)
+      gc(reset=T)
+      print(paste(var,' DONE.                    '))
+    }else if(var%in%method[[2]]){
+      print(var)
+      # meth2
+      text_vars = c('text','text_orga','text_roche','text_autre','text_noinfo')
+      condition_generale = loaded_data$text==0 | !(var%in%text_vars)
+      if(condition_generale){
+        
+        if(var %in% text_vars){
+          path = paste(dpath,'/0_mydata/text',sep="")
+        }else{
+          path = paste(dpath,'/0_mydata/',var,sep="")
+        }
+        x = new("GDALReadOnlyDataset", path)
+        getDriver(x)
+        getDriverLongName(getDriver(x))
+        xx=asSGDF_GROD(x)
+        r = raster(xx)
+        crs(r) <- "+proj=laea +lat_0=52 +lon_0=10 +x_0=4321000 +y_0=3210000 +ellps=GRS80 +units=m" 
+        print('projecting occurences..')
+        coos = data.frame(table$Longitude,table$Latitude)
+        pts_occ = SpatialPointsDataFrame( coords=coos,data=coos,proj4string = CRS("+proj=longlat +datum=WGS84"))
+        coords = spTransform( pts_occ , CRS("+proj=laea +lat_0=52 +lon_0=10 +x_0=4321000 +y_0=3210000 +ellps=GRS80 +units=m") )@coords
+        proj_table = data.frame( Longitude =coords[,1] , Latitude =coords[,2]  )
+        rm(coords,pts_occ,coos)
+        print('cropping France...')
+        lims <- extent(3200000,4350000,1500000,3200000)
+        r2 <- crop(r, lims)
+        print('extracting values...')
+        vals = extract( r2 ,  proj_table )
+        if(fix & sum(is.na(vals))>0){
+          print('correcting values...')
+          vals[is.na(vals)] = get_value_fromXY_par(r2, proj_table[is.na(vals),] , d_to_closest_if_NA = d_NA )
+        }
+        rm(r,r2)
+        gc(reset=T)
+        setwd(path)
+        attrib = read.csv('attrib.csv',sep=";",header=T)
+        attrib = data.frame(attrib)
+        print('got values')
+        new_vals = vals
+        # Remplacer les valeurs par la valeur QUANTI associée
+        for (cate in attrib$VALUE){
+          new_vals[vals==cate] = attrib$QUANTI[attrib$VALUE==cate]
+        }
+        
+        if( var%in%text_vars ){
+          if('text'%in%variables){
+            # chaque catégorie non pertinente pour la texture se voit associée 
+            # - 0 si la variable binaire est créée par ailleurs : Ainsi, la valeur 0 stocke
+            # l'ensemble des valeurs non pertinentes sans affecter l'estimation
+            # du paramètre de "text", car une autre variable binaire est ajustée
+            # pour ces occurrences
+            # - NA sinon, ce qui aboutira à éliminer cette occurrence
+            table$text= new_vals
+            if('text_noinfo'%in%variables){table$text[vals==0]=0}else{table$text[vals==0]=NA}
+            if('text_orga'%in%variables){table$text[vals==8]=0}else{table$text[vals==8]=NA}
+            if('text_roche'%in%variables){table$text[vals==7]=0}else{table$text[vals==7]=NA}
+            if('text_autre'%in%variables){table$text[vals==6]=0}else{table$text[vals==6]=NA}
+          }
+          if('text_noinfo'%in%variables){
+            table$text_noinfo=F
+            table$text_noinfo[new_vals==0] = T
+          }
+          if('text_orga'%in%variables){
+            table$text_orga=F
+            table$text_orga[new_vals==8]= T
+          }
+          if('text_roche'%in%variables){
+            table$text_roche=F
+            table$text_roche[new_vals==7]=T
+          }
+          if('text_autre'%in%variables){
+            table$text_autre=F
+            table$text_autre[new_vals==6]=T
+          }
+          loaded_data$text=1
+        }else{
+          eval( parse(text= paste("table$",var,'=new_vals',sep=""))  )
+          print(paste(var,' DONE.                    '))
+        }
+        
+      }
+      
+    }else if(var%in%method[[3]]){
+      print(var)
+      # meth3
+      path = paste(dpath,'0_mydata/hydro',sep="")
+      
+      # Projection des coordonnées occurences
+      print('projecting occurences...')
+      coos = data.frame(table$Longitude,table$Latitude)
+      pts_occ = SpatialPointsDataFrame( coords=coos,data=coos,proj4string = CRS("+proj=longlat +datum=WGS84"))
+      pts_occ=spTransform(pts_occ,CRS("+proj=lcc +lat_1=44 +lat_2=49 +lat_0=46.5 +lon_0=3 +x_0=700000 +y_0=6600000 +ellps=GRS80 +units=m +no_defs"))
+      
+      
+      # Chargement données requises si pas déjà chargées
+      print('loading data...')
+      if ((var%in% c('deau','proxi_eau')) & loaded_data$cours_eau==0){
+        cours_eau = readOGR(dsn = path,layer="COURS_D_EAU", stringsAsFactors=FALSE)
+        loaded_data$cours_eau=1
+      }
+      if(var%in%c('dmer','deau','proxi_eau') & loaded_data$eau==0){
+        eau = readOGR(dsn = path,layer="HYDROGRAPHIE_SURFACIQUE", stringsAsFactors=FALSE)
+        loaded_data$eau=1
+      }
+      
+      # préparation données
+      print('preparing data...')
+      if (var %in% c('deau','proxi_eau')){
+        eau_douce = eau[eau$NATURE=="Eau douce permanente",]
+        liste = list( pt= pts_occ,cours_eau=cours_eau,eau_douce=eau_douce,gDistance=gDistance)
+      }else if(var=='dmer'){
+        mer = eau[eau$TYPE=="Pleine mer",]
+        liste = list( pt= pts_occ,mer=mer,gDistance=gDistance)
+      }
+      # Fonction de calcul de la VE
+      if(var=='deau'){
+        FUNC = function(x,pt,cours_eau,eau_douce,gDistance){ min( gDistance(pt[x,],cours_eau) , gDistance(pt[x,],eau_douce) ) }
+      }else if(var=='proxi_eau'){
+        FUNC = function(x,pt,cours_eau,eau_douce,gDistance){ 
+          d = min( gDistance(pt[x,],cours_eau) , gDistance(pt[x,],eau_douce) )
+          if(d<25){return(TRUE)}else{return(FALSE)}  }
+      }else if(var=='dmer'){ FUNC = function(x,pt,mer,gDistance){gDistance(pt[x,],mer)} }
+      
+      print('calculating variable..')
+      vals = fragmented_parallel( dim(table)[1] , FUNC , list_arg = liste, n_jobs = 2 , type = 'vector')
+      eval( parse(text= paste("table$",var,'=vals',sep=""))  )
+      # nettoyage des variables
+      rm(pts_occ)
+      print(paste(var,' DONE.                    '))
+    }else if(var%in%method[[4]]){
+      print(var)
+      # meth4
+      print('projecting occurences...')
+      coos = data.frame(table$Longitude,table$Latitude)
+      pts_occ = SpatialPointsDataFrame( coords=coos,data=coos,proj4string = CRS("+proj=longlat +datum=WGS84"))
+      pts_occ=spTransform(pts_occ,CRS("+proj=lcc +lat_1=44 +lat_2=49 +lat_0=46.5 +lon_0=3 +x_0=700000 +y_0=6600000 +ellps=GRS80 +units=m +no_defs"))
+      
+      print('loading data...')
+      path = paste(dpath,'/0_mydata/routes',sep="")
+      routes = readOGR(dsn = path,layer="ROUTES", stringsAsFactors=FALSE)
+      
+      print('preparing data...')
+      liste = list(pt=pts_occ,rd=routes,dist=gDistance)
+      FUNC = function(i,pt,rd,dist){dist(pt[i,],rd)}
+      
+      print('calculating variable...')
+      vals= fragmented_parallel(dim(table)[1],FUNC,list_arg = liste,n_jobs = 2 ,type = 'vector')
+      eval( parse(text= paste("table$",var,'=vals',sep=""))  )
+      rm(routes,pts_occ)
+      gc(reset=T)
+      print(paste(var,' DONE.                    '))
+    }else if(var%in%method[[5]] & loaded_data$clc==0){
+      print(variables[variables %in% method[[5]]])
+      # meth5: binary category of 'clc' variable 
+      r= raster( paste(dpath,'0_mydata/clc/g100_clc12_v18_5_FR_WGS84.tif',sep=''))
+      proj = "+proj=laea +lat_0=52 +lon_0=10 +x_0=4321000 +y_0=3210000 +ellps=GRS80 +units=m"
+      crs(r) <-  proj
+      coos = data.frame(table$Longitude,table$Latitude)
+      pts_occ = SpatialPointsDataFrame( coords=coos,data=coos,proj4string = CRS("+proj=longlat +datum=WGS84"))
+      coords = spTransform( pts_occ , proj  )@coords
+      proj_table = data.frame( Longitude =coords[,1] , Latitude =coords[,2]  )
+      rm(coords,pts_occ,coos)
+      print('extracting values...')
+      vals = extract(r, proj_table )
+      if(fix & sum(is.na(vals))){
+        print('correcting values...')
+        vals[is.na(vals)] = get_value_fromXY_par(r,proj_table[is.na(vals),],d_to_closest_if_NA = 2000 )
+      }
+      print('transforming to binary variables...')
+      setwd(paste(dpath,'0_mydata/clc',sep=""))
+      legend  = read.csv('clc_legend.csv',sep=";",header=T)
+      legend = legend[,c(5,1)]
+      legend[,1] = as.character(legend[,1])
+      legend = legend[ legend[,1] %in% variables ,]
+      df = quanti_to_category(vals,legend)
+      table = cbind(table,df)
+      rm(proj_table,r)
+      gc(reset=T)
+      print('variable(s) DONE.')
+      loaded_data$clc=1
+    }else if(var%in%method[[6]]){
+      print(variables[variables %in% method[[6]]])
+      # meth6 : variable "clc" toutes catégories
+      r= raster( paste(dpath,'0_mydata/clc/g100_clc12_v18_5_FR_WGS84.tif',sep=''))
+      proj = "+proj=laea +lat_0=52 +lon_0=10 +x_0=4321000 +y_0=3210000 +ellps=GRS80 +units=m"
+      crs(r) <-  proj
+      coos = data.frame(table$Longitude,table$Latitude)
+      pts_occ = SpatialPointsDataFrame( coords=coos,data=coos,proj4string = CRS("+proj=longlat +datum=WGS84"))
+      coords = spTransform( pts_occ , proj  )@coords
+      proj_table = data.frame( Longitude =coords[,1] , Latitude =coords[,2]  )
+      rm(coords,pts_occ,coos)
+      print('extracting values...')
+      vals = extract(r, proj_table )
+      if(fix & sum(is.na(vals))>0){
+        print('correcting values...')
+        vals[is.na(vals)] = get_value_fromXY_par(r,proj_table[is.na(vals),],d_to_closest_if_NA = 2000 )
+      }
+      eval( parse(text= paste("table$",var,'=vals',sep=""))  )
+    }else{
+      print(paste(var,' est inconnue au bataillon -> Se réferrer à la liste des variables reconnues.'))
+    }
+  }
+  return(table)
+}
+
+
+# Change land cover to spht := simplified plant habitat type = urban / arable / grasses / forest / other
+get_spht = function(clcVec){
+  setwd(paste('C:/Users/',user,'/pCloud local/0_These/data/MTAP article/data/',sep=""))
+  clc.variables = readRDS('clc.variables.RData')
+  names = clc.variables[[1]]
+  
+  spht = rep(NA,length(clcVec))
+  cd = clcVec %in% clc.variables[[2]][[which(names=='arable')]] | clcVec%in%c(12,13,15,16,20) 
+  spht[cd] = "cultivated"
+  cd = clcVec %in% clc.variables[[2]][[which(names=='pasture')]] | clcVec %in% clc.variables[[2]][[which(names=='nat_grass')]] | clcVec %in% clc.variables[[2]][[which(names=='moors')]] | clcVec %in% clc.variables[[2]][[which(names=='sclero')]]
+  spht[cd] = "grasses"
+  cd = clcVec %in% clc.variables[[2]][[which(names=='brl_for')]] | clcVec %in% clc.variables[[2]][[which(names=='coni_for')]] | clcVec %in% clc.variables[[2]][[which(names=='mixed_for')]] | clcVec %in% clc.variables[[2]][[which(names=='transi_wood')]]
+  spht[cd] = "forest"
+  cd = clcVec %in% clc.variables[[2]][[which(names=='arti')]] | clcVec %in% clc.variables[[2]][[which(names=='semi_arti')]] | clcVec%in%c(11)
+  spht[cd] = "urban"
+  spht[is.na(spht)] = "other"
+  return(spht)
 }
 

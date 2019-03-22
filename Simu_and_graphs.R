@@ -159,9 +159,7 @@ for(j in Sched$id){
     if(i==1){DF = df}else{DF=rbind(DF,df)}
   }
   DF$axe3 = DF$Longitude - 5
-  
-  # Duplicate and attach background points (dom) to occurrences (DF)
-  df = bind.background.pts(DF,bg=dom,Bias_killer=500)
+
   # msh : number of quadrats along Longitude axis
   msh = Sched$mesh[j]
   # q : size of quadrats for sampling effort model
@@ -169,6 +167,9 @@ for(j in Sched$id){
   # Get the quadrat identifier of all points
   # It is then used as a factor in glmnet
   df = get_q_hash_aniso(df,q,1,0,0)
+  
+  # Duplicate and attach background points (dom) to occurrences (DF)
+  df = bind.background.pts(DF,bg=dom,Bias_killer=500)
   
   # Fit model with GLMNET
   deb=Sys.time()
