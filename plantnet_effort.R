@@ -1,24 +1,37 @@
-
-
 library(glmnet)
 library(raster)
 library(rgdal)
 library(rgeos)
+library(data.table)
+library(plyr)
+library(ggplot2)
 
-user = "Christophe"
+dir = "C:/Users/Christophe/Downloads/SamplingEffort-master/"
+RepoDir=dir
+dataDir =dir
+saveDir =dir
 
-RepoDir = paste('C:/Users/',user,"/pCloud local/0_These/Github/SamplingEffort/",sep="")
-saveDir = paste('C:/Users/',user,"/pCloud local/0_These/data/LOF data/19_03_20 for article/",sep="")
-dataDir = paste('C:/Users/',user,"/pCloud local/0_These/data/",sep="")
-
-setwd(RepoDir)
-source('_functions.R')
-
+#### Parameters
+# Model formula 
 originalVes = c('etp','chbio_12','chbio_1','chbio_5','alti','slope','awc_top','bs_top','clc')
 predictor_formula = " ~ etp + I(etp^2) + I(chbio_12-etp) + I((chbio_12-etp)^2) + chbio_1 + I(chbio_1^2) + chbio_5 + I(chbio_5^2) + alti + I(alti^2) + slope + I(slope^2) + awc_top + I(awc_top^2) + bs_top + I(bs_top^2) + spht + slope:I(chbio_12-etp)"
 
-nSpecies = 170
+# species occurrences selection parameters
+nSpecies = 300
 scoreThresh = .85
+# Sampling cells grid parameters
+squareSize = 4000
+Min= 5
+# Background points parameters
+n = 6
+delta = 2
+
+# Chosen species for plot of the intensity over France 
+SpeciesForIntensityPlot= "Phytolacca americana L."
+
+setwd(dir)
+source('_functions.R')
+
 
 ######
 # Extract species occurrences
@@ -27,7 +40,8 @@ scoreThresh = .85
 # Download zip : 
 ######
 
-setwd('P:/Partage GLC19/')
+setwd(dir)
+
 OCC= read.csv("PL_complete.csv",sep=";",header=T)
 OCC = OCC[OCC$FirstResPLv2Score>scoreThresh,,drop=F]
 
@@ -52,13 +66,12 @@ print(paste('Number of occurrences :',dim(occ)[1]))
 # remove empty or scarce squares
 ######
 
-squareSize = 4000
-Min= 5
-
 ## Make raster of squares including all the metropolitan French territory  
 # get france polygon 
 setwd(RepoDir)
-france = getData('GADM',country="FRA",level="0")
+#france = getData('GADM',country="FRA",level="0")
+france = readRDS('gadm36_FRA_0_sp.rds')
+
 # Project to lambert 93 
 frProj = spTransform(france,CRS("+proj=lcc +lat_1=49 +lat_2=44 +lat_0=46.5 +lon_0=3 +x_0=700000 +y_0=6600000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs"))
 
@@ -71,10 +84,9 @@ r = raster(ext= ext,resolution=c(squareSize,squareSize),crs = CRS("+proj=lcc +la
 r_frBuf = rasterize(frBuff, r)  
 # Values of the raster = Indices of squares  
 r_frBuf[!is.na(r_frBuf[])] = 1:(sum(!is.na(getValues(r_frBuf))))
-plot(r_frBuf)
 
 # Number of cells
-sum(!is.na(getValues(r_frBuf)))
+print('Number of cells:',sum(!is.na(getValues(r_frBuf))))
 
 ## Remove squares with less than Min=5 occurrences 
 # Count occurrences per cell
@@ -84,331 +96,241 @@ occProj = spTransform(pts,CRSobj = CRS("+proj=lcc +lat_1=49 +lat_2=44 +lat_0=46.
 occ = cbind(occ,as.data.frame(occProj@coords))
 colnames(occ)[(dim(occ)[2]-1):dim(occ)[2]]= c('x_lamb93','y_lamb93')
 
-occ$squareId = extract( r_frBuf, occ[,c('x_lamb93','y_lamb93')]  )
+occ$q_hash = extract( r_frBuf, occ[,c('x_lamb93','y_lamb93')]  )
 
-tab = table(occ$squareId)
+tab = table(occ$q_hash)
 tab = tab[order(tab,decreasing = T)] 
-barplot(tab)
-sum(tab>Min)
 
 indicesToKeep = as.numeric(names(tab)[tab>Min])
 
 r_lofCells = r_frBuf
 r_lofCells[!r_lofCells[]%in%indicesToKeep] = NA
-plot(r_lofCells)
+#plot(r_lofCells)
+
 
 occTot = occ
-occ = occTot[occTot$squareId%in%indicesToKeep,]
-sum(occ$squareId%in%indicesToKeep) # Number of occurrences for fitting LOF
+occ = occTot[occTot$q_hash%in%indicesToKeep,]
+#sum(occ$q_hash%in%indicesToKeep) # Number of occurrences for fitting LOF
 
-cellsIds = unique(occ$squareId)
-length(cellsIds)
+cellsIds = unique(occ$q_hash)
+print(paste('Number of sampling cells retained:',length(cellsIds)))
 
 setwd(saveDir)
-saveRDS(occ,paste('occ_lof',nSpecies,'_score',scoreThresh,sep=""))
+saveRDS(r_frBuf,'r_frBuf')
+r_lofCellsName = paste('r_lofCells',nSpecies,'_score',scoreThresh,'_size',squareSize,sep="")
+saveRDS(r_lofCells,r_lofCellsName)
+occName = paste('occ_lof',nSpecies,'_score',scoreThresh,'_size',squareSize,sep="")
+saveRDS(occ,occName)
 
 ######
-# Prepare background points LOF 
+# Draw n background point per cell 
 ######
+## Draw n points per cell
+Df = draw.pts.in.cells(n,r_lofCells,originalVes,delta,dataDir,miniPerCell=3)
+cd = complete.cases(Df)
+Df = Df[cd,]
 
-# We uniformly draw radom points inside the square extent of the raster and
-# (i) MAXENT: Keep those falling inside the france raster (4 km buffer) for MAXENT, until at least 3 per cell
-# (i) LOF: Only keep those falling inside LOF squares (until at least 5 per square)
-
-nTmp = 30000
-ext = extent(r_frBuf)
-LOF_background = data.frame(x_lamb93 = NA , y_lamb93 = NA , q_hash = NA)
-LOF_background = LOF_background[-1,,drop=F]
-minNPerSquareLOF = 0
-while(minNPerSquareLOF<4){
-  tmp = data.frame(x_lamb93 = runif(nTmp,ext[1],ext[2]) , y_lamb93 = runif(nTmp,ext[3],ext[4]) , q_hash = NA)
-  # Filter for LOF
-  tmp$q_hash = extract(r_lofCells,tmp[,1:2])
-  cdLOF = !is.na(tmp$q_hash)
-  LOF_background = rbind(LOF_background,tmp[cdLOF,,drop=F])
-  
-  emptyCells = setdiff(cellsIds,unique(LOF_background$q_hash))
-  if(length(emptyCells)>0){
-    minNPerSquareLOF = 0
-  }else{minNPerSquareLOF = min(table(LOF_background$q_hash))}
-    
-  flush.console()
-  cat('     \r  Mini. n° points/LOF square:',minNPerSquareLOF,', tot. n° LOF pts:',dim(LOF_background)[1],'        \r')
-}
-
-## Get environmental variables
-# LOF
-pts = SpatialPoints(LOF_background[,1:2],proj4string = CRS("+proj=lcc +lat_1=49 +lat_2=44 +lat_0=46.5 +lon_0=3 +x_0=700000 +y_0=6600000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs") )
-pts = spTransform(pts, CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs"))
-LOF_background = cbind(LOF_background,data.frame(pts@coords))
-colnames(LOF_background)[4:5] = c('Longitude','Latitude')
-LOF_background = get_variables(originalVes,LOF_background,dpath = dataDir,fix=F)
-LOF_background$spht = factor(get_spht(LOF_background$clc))
-nona = complete.cases(LOF_background)
-LOF_background = LOF_background[nona,]
-
-
-#####
-# Optimal drawing of background points
-##### 
-
-# We use an algorithm to draw background points so that
-# (i) the whole number of points is enought for their 90% quantile enveloppe
-# (in the features space) match the one of the whole geographic domain
-# (ii) the concentration of points per unit of volume in the features
-# space is the same in all cells
-
-# Parameters
-n = 20
-delta = 2
-eigRatio = 0.95
-Alpha = 0.92
-bootstrapSamples = 5
-envelopeVolumeError = 0.05
-beginWith = 20000
-step = 10000
-
-### Algorithm
-
-## 1) Draw a large set of points representing the whole geographic domain 
-# => n points per cell
-resX= (extent(r_lofCells)[2]-extent(r_lofCells)[1])/ncol(r_lofCells)
-resY = (extent(r_lofCells)[4]-extent(r_lofCells)[3])/nrow(r_lofCells)
-cellsCoo = coordinates(r_lofCells)
-cellsCoo = cellsCoo[!is.na(getValues(r_lofCells)),]
-q_hashes = expand.grid(1:n,cellsIds)[,2]
-x=rep(-9999,length(cellsIds)*n)
-y=rep(-9999,length(cellsIds)*n)
-toReDraw = rep(T,length(cellsIds)*n)
-Df = data.frame(q_hash = q_hashes,x_lamb93=NA,y_lamb93=NA,Longitude=NA,Latitude=NA)
-for(i in 1:length(originalVes)){
-  eval(parse(text=paste('Df$',originalVes[i],'=NA',sep="")))
-}
-
-while(sum(toReDraw)>0){
-  qLack = unique(q_hashes[toReDraw])
-  print(paste('Missing ',sum(toReDraw),' points over into',length(qLack),' cells'))
-  
-  for(i in 1:length(qLack)){
-    toFill = q_hashes==qLack[i] & toReDraw
-    nLack = sum(x[toFill]==-9999)
-    
-    xmin = cellsCoo[i,1]-resX/2+delta
-    xmax = cellsCoo[i,1]+resX/2-delta
-    ymin = cellsCoo[i,2]-resY/2+delta
-    ymax = cellsCoo[i,2]+resY/2-delta
-    
-    x[toFill] = runif(nLack,xmin,xmax)
-    y[toFill] = runif(nLack,ymin,ymax)
-    
-    if(i/1000==round(i/1000)){
-      flush.console()
-      cat('    \r     Process...',100*i/length(qLack),'%       \r    ')
-    }
-  }
-  Df[toReDraw,c('x_lamb93')] = x[toReDraw] 
-  Df[toReDraw,c('y_lamb93')] = y[toReDraw] 
-  
-  
-  pts = SpatialPoints(Df[toReDraw,c('x_lamb93','y_lamb93')],proj4string = CRS("+proj=lcc +lat_1=49 +lat_2=44 +lat_0=46.5 +lon_0=3 +x_0=700000 +y_0=6600000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs "))
-  pts = spTransform(pts,CRSobj = CRS('+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs '))
-  Df[toReDraw,c('Longitude')] = pts@coords[,1]
-  Df[toReDraw,c('Latitude')]=pts@coords[,2]
-  
-  
-  Df[toReDraw,originalVes] = get_variables(originalVes,Df[toReDraw,c('Longitude','Latitude')],dpath = dataDir,fix=F)[,originalVes]
-  # Points that having NA environmental variables must be redrawn
-  # until we have all required points
-  toReDraw = !complete.cases(Df)
-  if(sum(toReDraw)>0){
-    x[toReDraw]= -9999
-    y[toReDraw]= -9999
-  }
-  
-}
-Df$spht = get_spht(Df$clc)
-
-## 2) Approximation of the environmental volume of the geographic space 
-# Get points coordinates over the PCA axis
-# the first axis such that the sum of their 
-# Eigen values makes a proportion of "eigRatio" of the total sum
-Des = model.matrix(as.formula(predictor_formula),Df)
-Des = Des[,2:dim(Des)[2]]
-Des = scale(Des)
-SVD = svd(Des)
-d = 0
-sumEig = 0
-while(sumEig/sum(SVD$d)<eigRatio){
-  d = d+1
-  sumEig = sumEig + SVD$d[d]
-}
-print(d)
-toAdd = SVD$u[,1:d]
-colnames(toAdd)=paste('axe_',1:d,sep="")
-toAdd=data.frame(toAdd)
-hist(toAdd$axe_1,breaks="fd") 
-# The distribution of our points over the SVD axis 
-# is not that gaussian... But still...
-# We approximate the total hyper-volume of the Alpha-confidence interval
-# envelope of the points distribution in the environmental space  
-# with an ellipsoïde
-axesLength = NULL
-for(di in 1:d){
-  quantiles = SVD$d[di]* quantile(toAdd[,di],c(0.5-Alpha/2,.5+Alpha/2))
-  axesLength = c(axesLength,quantiles[2]-quantiles[1])
-}
-# We now approximate the Alpha-enveloppe volume
-# of the whole domain with an ellipsoïd volume
-Gamma = 1/ (exp(1)*dgamma(1,shape=(d/2)+1,scale=1) ) 
-Vol = prod(axesLength)* pi^(d/2) / Gamma 
-
-#3) Compute the volume of every cell
-ptPerCell = data.frame(q_hash =cellsIds, volume=rep(NA,length(cellsIds)),nPt = NA)
-for(i in 1:length(cellsIds)){
-  cellPts = toAdd[Df$q_hash==cellsIds[i],]
-  axesLength = NULL
-  for(di in 1:d){
-    quantiles = SVD$d[di]* quantile(cellPts[,di],c(0.5-Alpha/2,.5+Alpha/2))
-    axesLength = c(axesLength,quantiles[2]-quantiles[1])
-  }
-  # We now approximate the Alpha-enveloppe volume
-  # of the whole domain with an ellipsoïd volume
-  ptPerCell$volume[i] =  prod(axesLength)* pi^(d/2) / Gamma
-  if(i/1000==round(i/1000)){
-    flush.console()
-    cat('    \r   Process...',100*i/length(cellsIds),'%       \r     ')
-  }
-}
-totVolumes = sum(ptPerCell$volume)
-ptPerCell$share = ptPerCell$volume/totVolumes
-
-
-if(F){
-  ## Facultative
-  # 4) Chose total number of background 
-  # so that their Alpha-enveloppe has approximately the same volume
-  # as the whole domain Alpha-enveloppe
-  # with tolerance in ratio : envelopeVolumeError  
-  v = 0
-  N = 0
-  brick = data.frame(N=NA,vMean = NA,vSd = NA)
-  brick = brick[-1,]
-  while(((v-2*sdv)/Vol)<(1-envelopeVolumeError)){
-    if(N==0){N=beginWith}else{N=N+step}
-    print(N)
-    
-    # Compute number of points to draw per cell
-    for(i in 1:length(cellsIds)){
-      expected = N * ptPerCell$share[i]
-      ptPerCell$nPt[i] = 1 + floor(expected-1) + rbinom(1,1,expected-floor(expected))
-    }
-    
-    vs = NULL
-    for(s in 1:bootstrapSamples){
-      print(paste('sample',s))
-      ids = NULL
-      # Draw points in each cells
-      for(i in 1:length(cellsIds)){
-        ids = c(ids,sample( which(q_hashes==cellsIds[i]) , min(ptPerCell$nPt[i],n) ) )
-        if(i/1000==round(i/1000)){
-          flush.console()
-          cat('    \r      Process...',100*i/length(cellsIds),'%       \r ')
-        }
-      }
-      
-      tmp = toAdd[ids,]
-      tmpAxesLen = NULL
-      for(di in 1:d){
-        quantiles = SVD$d[di]* quantile(tmp[,di],c(0.5-Alpha/2,.5+Alpha/2))
-        tmpAxesLen = c(tmpAxesLen,quantiles[2]-quantiles[1])
-      }
-      # Add total volume
-      vs = c(vs,  prod(tmpAxesLen) * pi^(d/2) / Gamma )
-    }
-    v = mean(vs)
-    sdv = sd(vs)
-    brick = rbind(brick,data.frame(N=N,vMean=v,vSd=sdv))
-  }
-  brick$type = "mean"
-  topl = rbind(brick,data.frame(N=brick$N,vMean=brick$vMean-2*brick$vSd,vSd=brick$vSd,type="Mean-2*sd"))
-  topl = rbind(topl,data.frame(N=brick$N,vMean=brick$vMean+2*brick$vSd,vSd=brick$vSd,type="Mean+2*sd"))
-  topl = rbind(topl,data.frame(N=brick$N,vMean=Vol,vSd=brick$vSd,type="whole domain volume"))
-  ggplot(topl,aes(x=N,y=vMean,colour=type))+geom_line()+scale_y_continuous(limits=c(0,max(topl$vMean)))+theme_bw()+ylab('Approximate Alpha-enveloppe volume')+xlab('Number of points drawn')
-}
-
-# CHOSE N
-N = 40000
-
-# We draw in each cell a number of points equal to 
-# n_q = 1 + floor(expected-1) + Bernoulli(expected-floor(expected))
-# if expected>1 => E[n_q] = expected  , and 1 otherwise 
-# Total number of background points is thus superior in expectation
-# to N, but this insures there is at least one point per cell 
-for(i in 1:length(cellsIds)){
-  expected = N * ptPerCell$share[i]
-  ptPerCell$nPt[i] = min( 1 + max(0,floor(expected-1)) + rbinom(1,1,expected-floor(expected)) , n)
-}
-# If it remains points to be distributed
-Reminder = N - sum(ptPerCell$nPt)
-ptPerCell= ptPerCell[order(ptPerCell$nPt,decreasing = T),]
-for(i in which(ptPerCell$nPt<20)){
-  toPut = 20-ptPerCell$nPt[i]
-  if(Reminder>=toPut){
-    Reminder = Reminder - toPut
-    ptPerCell$nPt[i] = ptPerCell$nPt[i] + toPut
-  }else{
-    ptPerCell$nPt[i] = ptPerCell$nPt[i] + Reminder
-    Reminder = 0
-  }
-}
-
-
-# Draw points from Df
-pool = NULL
-for(i in 1:length(cellsIds)){
-  pool = c(pool, sample( which(q_hashes==cellsIds[i]) , min(ptPerCell$nPt[i],n ) ))
-  if(i/1000==round(i/1000)){
-    flush.console()
-    cat('    \r      Process...',100*i/length(cellsIds),'%       \r ')
-  }
-}
-toKeep = (1:dim(Df)[1])%in%pool
-
-BG = Df[toKeep,,drop=F]
 # Save 
 setwd(saveDir)
-saveRDS(BG,paste('BackgroundPts_lof',nSpecies,'_score',scoreThresh,sep=""))
+BGptsName = paste('BackgroundPts_nPerCell_lof',nSpecies,'_score',scoreThresh,'_size',squareSize,sep="")
+saveRDS(Df,BGptsName)
+
 
 #####
-# Fit LOF-GLMNET
+# Fit and save model
 #####
-
-library(glmnet)
-library(raster)
-library(rgdal)
-library(rgeos)
-RepoDir = paste('C:/Users/',user,"/pCloud local/0_These/Github/SamplingEffort/",sep="")
-saveDir = paste('C:/Users/',user,"/pCloud local/0_These/data/LOF data/19_03_20 for article/",sep="")
-
-setwd(RepoDir)
-source('_functions.R')
-
-originalVes = c('etp','chbio_12','chbio_1','chbio_5','alti','slope','awc_top','bs_top','clc')
-predictor_formula = " ~ etp + I(etp^2) + I(chbio_12-etp) + I((chbio_12-etp)^2) + chbio_1 + I(chbio_1^2) + chbio_5 + I(chbio_5^2) + alti + I(alti^2) + slope + I(slope^2) + awc_top + I(awc_top^2) + bs_top + I(bs_top^2) + spht + slope:I(chbio_12-etp)"
+rm(Df)
+gc(reset=T)
 
 setwd(saveDir)
-BG = readRDS('BackgroundPts_lof170_score0.85')
-occ = readRDS('occBackgroundPts_lof170_score0.85')
+BG = readRDS(BGptsName)
+occ = readRDS(occName)
 
-colnames(occ)[colnames(occ)=="squareId"]="q_hash"
-colnames(occ)[colnames(occ)=="glc19SpId"]="taxa"
+if("glc19SpId"%in%colnames(occ)){
+  colnames(occ)[colnames(occ)=="glc19SpId"]="taxa"
+}
 occ = occ[,c('q_hash',originalVes,'spht','taxa')]
 BG = BG[,c('q_hash',originalVes,'spht')]
 
-Data = bind.background.pts(occ,BG,Bias_killer=300,equalSizeCells=T)
+Data = bind.background.pts(occ,BG,Bias_killer=300)
 
-lof.mod = lof_glmnet(Data,Data$pseudo_y,sub('~(.*)','\\1' , predictor_formula),weights=Data$w,lambdaMinRatio=1e-8,nlambda=200)
+lof.mod = lof_glmnet(Data,Data$pseudo_y,sub('~(.*)','\\1' , predictor_formula),weights=Data$w,lambdaMinRatio=1e-12,nlambda=300)
 
 setwd(saveDir)
-saveRDS(lof.mod,'model_lof170_score.85')
+modelName = paste('model_lof',nSpecies,'_score',scoreThresh,'_squareSize',squareSize,'_BG',n,'ptsPerCell')
+saveRDS(lof.mod,modelName)
+
+rm(Data)
+gc(reset=T)
+
+
+######
+# Load fitted model and data 
+# TO RUN before ALL plots
+######
+
+
+setwd(saveDir)
+df = readRDS(paste(saveDir,"df_departements_FR",sep=""))
+occ = readRDS(occName)
+BG = readRDS(BGptsName)
+lof.mod = readRDS(modelName)
+r_lofCells = readRDS(r_lofCellsName)
+r_frBuf = readRDS('r_frBuf')
+
+if("squareId"%in%colnames(occ)){
+  colnames(occ)[which(colnames(occ)=="squareId")] = "q_hash"
+}
+
+tabS = table(occ$glc19SpId)
+tabS = tabS[order(tabS,decreasing = T)]
+tabS = data.frame(glc19SpId=names(tabS),nOcc=as.numeric(tabS))
+
+occo = occ[,c('glc19SpId','scName')]
+occo$scName = as.character(occo$scName)
+occo$glc19SpId = as.character(occo$glc19SpId)
+occo = unique(occo)
+tabS = merge(tabS,occo,all.x=T)
+tabS = tabS[order(tabS$nOcc,decreasing = T),]
+
+SpTable = tabS[,c('glc19SpId','nOcc','scName')]
+setwd(saveDir)
+write.table(SpTable,paste("speciesTable",nSpecies,".csv",sep=""),sep=";",row.names=F,col.names=T)
+
+# older model version
+nl = dim(lof.mod$beta)[2]
+coefficients = get.treat.coef(lof.mod,nl)$coefficients
+qCoefs = coefficients[regexpr("q_hash",names(coefficients))>0]
+cells = data.frame(q_hash=paste('q_hash',unique(occ$q_hash),sep=""))
+coefs = data.frame(coef= qCoefs, q_hash = names(qCoefs))
+cells = merge(cells,coefs,by="q_hash",all.x=T)
+cells$coef[is.na(cells$coef)] = 0
+hist(log10(exp(cells$coef)),breaks='fd')
+coos = rasterToPoints(r_lofCells)
+colnames(coos)[1:3]=c('x_l93','y_l93','q_hash')
+coos=as.data.frame(coos)
+coos$q_hash = paste('q_hash',coos$q_hash,sep="")
+cells = merge(cells,coos,by="q_hash",all.x=T)
+
+
+######
+# Plot effort estimate on a Map
+######
+
+#### Plot effort sur departements
+tmp = log10(exp(cells$coef))
+classes = cut(tmp,c(min(tmp)-.1,quantile(tmp,c(.1,.4,.6,.9)),max(tmp)+.1),dig.lab=2)
+
+labels = data.frame(x=c(500000,650000,470000,400000,600000),
+                    y=c(6300000,6250000,6500000,6340000,6650000),
+                    label=c("32","11","16","40","36"))
+
+
+#sum(is.na(classes))
+#unique(classes)
+#unique(tmp[which(is.na(classes))])
+colo = colorRampPalette(c("darkorchid4","goldenrod"))(length(unique(classes)))
+lev= levels(classes)
+labels = paste(lev,paste('/ quantile',c('0 to .1','.1 to .4','.4 to .6','.6 to .9','.9 to 1')))
+
+p = ggplot()+geom_polygon(data=df,aes(x=lon,y=lat,group=id),fill = NA,color = "grey20",size=.35)+theme_bw()
+p = p + geom_tile(data=cells,aes(x=x_l93,y=y_l93,fill=classes),alpha=.95)+scale_fill_manual(values=colo,name='log10(samp. eff.)',labels=labels)+xlab('Longitude L93')+ylab('Latitude L93')
+p = p + theme(legend.title = element_text(size=18),
+              legend.text = element_text(size=15),
+              axis.title.x = element_text(size=18),
+              axis.title.y = element_text(size=18),
+              axis.text.x = element_text(size=13),
+              axis.text.y = element_text(size=13))
+setwd(saveDir)
+png(paste('effortMap_',modelName,'.png'),width=1000,height=750)
+print(p)
+dev.off()
+
+#####
+# Plot species intensity over France
+#####
+
+resCell = 4000
+nInsideCell= 2
+
+# Discrete intensity map
+### Make prediction grid on all France
+resInsideCell = resCell/ nInsideCell
+sequence = seq( -resInsideCell*(nInsideCell-1)/2 ,
+                resInsideCell*(nInsideCell-1)/2 ,
+                resInsideCell)
+AllCells = rasterToPoints(r_frBuf)
+colnames(AllCells) = c('x_l93','y_l93','cellId')
+AllCells = data.frame(AllCells)
+grid = expand.grid(cellId=unique(AllCells$cellId),xdif=sequence,ydiff=sequence)
+grid = merge(AllCells,grid,by='cellId')
+grid$x_l93= grid$x_l93 + grid$xdif
+grid$y_l93 = grid$y_l93 + grid$ydiff
+grid = grid[,c('cellId','x_l93','y_l93')]
+pts = SpatialPoints(grid[,c('x_l93','y_l93')],proj4string = CRS("+proj=lcc +lat_1=49 +lat_2=44 +lat_0=46.5 +lon_0=3 +x_0=700000 +y_0=6600000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs"))
+pts = spTransform(pts,CRSobj = CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs"))
+pts = pts@coords
+colnames(pts)=c('Longitude','Latitude')
+grid = cbind(grid,pts)
+
+Sp = as.character(tabS$glc19SpId[tabS$scName==SpeciesForIntensityPlot])
+
+glc19SpIdVeco = as.character(SpTable$glc19SpId)
+originalVes = c('etp','chbio_12','chbio_1','chbio_5','alti','slope','awc_top','bs_top','clc',"spht")
+predMatrix = predict.lof.spLogRelativeIntensity(grid,
+                                                coefficients,
+                                                Intensityformula = as.formula(" ~ etp + I(etp^2) + I(chbio_12-etp) + I((chbio_12-etp)^2) + chbio_1 + I(chbio_1^2) + chbio_5 + I(chbio_5^2) + alti + I(alti^2) + slope + I(slope^2) + awc_top + I(awc_top^2) + bs_top + I(bs_top^2) + spht + slope:I(chbio_12-etp)"),
+                                                originalVes = originalVes, 
+                                                taxasToPredict = Sp,
+                                                glc19SpIdVec= glc19SpIdVeco,
+                                                extractorScript = paste(dir,'_functions.R',sep=""),
+                                                dataDir=dir)
+pred = as.vector(predMatrix)
+tmp = log10(exp(pred))
+grido = grid[!is.na(tmp),]
+tmp = tmp[!is.na(tmp)]
+
+# PLOT
+df = readRDS(paste(saveDir,"df_departements_FR",sep=""))
+classes = cut(tmp,c(min(tmp)-.1,quantile(tmp,c(.1,.4,.6,.9),na.rm=T),max(tmp)+.1),dig.lab=2,na.rm=T)
+colo = colorRampPalette(c("darkorchid4","goldenrod"))(length(unique(classes)))
+lev= levels(classes)
+#colVals = sapply(classes,function(cl) colo[lev==cl])
+dptsNum = data.frame(x=c(500000,650000,470000,400000,600000),
+                    y=c(6300000,6230000,6520000,6340000,6635000),
+                    label=c("32","11","16","40","36"))
+labels = paste(lev,paste('/ quantile',c('0 to .1','.1 to .4','.4 to .6','.6 to .9','.9 to 1')))
+p = ggplot()+geom_polygon(data=df,aes(x=lon,y=lat,group=id),fill = NA,color = "grey20",size=.35)
+p = p + geom_tile(data=grido,aes(x=x_l93,y=y_l93,fill=classes),size=1,alpha=.8)+scale_fill_manual(values=colo,name="log10 of species intensity",labels=labels)+theme_bw()
+p = p + geom_text(data=dptsNum,aes(x=x,y=y,label=label),size=6)
+p = p + xlab("Longitude in Lambert 93") + ylab("Latitude in Lambert 93")
+p = p + theme(legend.title = element_text(size=18),
+              legend.text = element_text(size=15),
+              axis.title.x = element_text(size=18),
+              axis.title.y = element_text(size=18),
+              axis.text.x = element_text(size=13),
+              axis.text.y = element_text(size=13))
+setwd(saveDir)
+png(paste("SpIntens_",tabS$scName[tabS$glc19SpId==Sp],'_',modelName,".png",sep=""),width=1200,height=750)
+print(p)
+dev.off()
+
+#####
+# Occurrences map
+#####
+
+occi = occ[occ$glc19SpId==Sp,]
+p=ggplot()+geom_polygon(data=df,aes(x=lon,y=lat,group=id),fill = NA,color = "grey20",size=.35)
+p = p + geom_point(data=occi,aes(x=occi$x_lamb93,y=occi$y_lamb93),alpha=.35,pch=18,cex=3,color="blue") + theme_bw()
+p = p + xlab("Longitude in Lambert 93") + ylab("Latitude in Lambert 93")
+p = p + theme(legend.title = element_text(size=18),
+              legend.text = element_text(size=15),
+              axis.title.x = element_text(size=18),
+              axis.title.y = element_text(size=18),
+              axis.text.x = element_text(size=13),
+              axis.text.y = element_text(size=13))
+setwd(saveDir)
+png(paste("SpOcc_",tabS$scName[tabS$glc19SpId==Sp],'_',modelName,".png",sep=""),width=1000,height=750)
+print(p)
+dev.off()
 

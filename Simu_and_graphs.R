@@ -1,22 +1,22 @@
 # Created on 20/03/2019
 # Simulation experiment of article 
 # "A novel method for estimating relative sampling effort across space from large amounts of geolocated species occurrences coming from citizen-science data"
-
+library(data.table)
 library(raster)
 library(ggplot2)
 library(glmnet)
 
-user = "Christophe"
-
-setwd(paste('C:/Users/',user,"/pcloud local/0_These/Github/SamplingEffort/",sep=""))
+dir = "C:/Users/Christophe/pCloud local/0_These/Github/SamplingEffort/"
+setwd(dir)
 source('_functions.R')
 
 SaveModels = T
-expeName = "19_03_20 test"
-runName = "_RUN_Mar 2019_4"
-SaveDir = paste("D:/LOF data/",expeName,sep="")
+expeName = "test"
+runName = "_0"
+SaveDir = dir
 
 setwd(SaveDir)
+
 
 #####
 # Define simulation domain & var. enviro.  & observation
@@ -41,6 +41,8 @@ cd = vals$Latitude==vals$Latitude[1]
 
 # SigmoFast
 vals$SigmoFast = SigmoFast(vals$axe3)
+
+vals$SigmoMedium = SigmoMedium(vals$axe3)
 # scalpHill
 vals$scalpHill = scalpHill(vals$axe3)
 # valley
@@ -107,11 +109,12 @@ f= "I( axe3 ) + I( axe3 ^2)"
 
 ## Define the experimental planning into "Sched" data.frame
 
-nrep = 1 # Number of repetitions per (sampling,species) model configurations
+nrep = 2 # Number of repetitions per (sampling,species) model configurations
 # True effort
 trueEffort = as.character(
   expand.grid(1:nrep,
               c('mid','cutNice','cutHurts'))[,2])  
+
 # Pool of virtual species to simulate
 spGroup = c( rep('Bisp', length(trueEffort)) )  
 # Class of estimators for sampling effort
@@ -166,16 +169,16 @@ for(j in Sched$id){
   q = 10 / msh
   # Get the quadrat identifier of all points
   # It is then used as a factor in glmnet
-  df = get_q_hash_aniso(df,q,1,0,0)
-  
+  DF = get_q_hash_aniso(DF,q,1,0,0)
+  dom = get_q_hash_aniso(dom,q,1,0,0)
   # Duplicate and attach background points (dom) to occurrences (DF)
-  df = bind.background.pts(DF,bg=dom,Bias_killer=500)
+  df = bind.background.pts(DF,bg=dom,Bias_killer=200)
   
   # Fit model with GLMNET
   deb=Sys.time()
   Momo = lof_glmnet(df,y = df$pseudo_y,occupationString = f,
                     weights = df$w,
-                    lambdaMinRatio = 1e-8,
+                    lambdaMinRatio = 1e-10,
                     nlambda=200)
   print(Sys.time()-deb)
 

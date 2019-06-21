@@ -1,7 +1,9 @@
 # created on 29/11/18
 # Functions for LOF-GLMNET and diagnostic
 
-
+#####
+# Simulation
+#####
 
 nauralToLoglinearParam = function(mu,sig){
   Beta_linear = mu/sig^2
@@ -287,174 +289,133 @@ get_hash = function(tab,breaks){
   return(tab)
 }
 
-### duplicate and attach background points to data for LOF 
-# (i) Complete occurrences data.frame with given background points
-# duplicated into all species
-# (ii) compute weights and y
-bind.background.pts = function(occ,bg,factorCols=NULL,Bias_killer=100,equalSizeCells=T){
-  occ = occ[complete.cases(occ),]
-  occ$taxa = factor(occ$taxa)
-  taxas = levels(occ$taxa)
-  bg$taxa = factor(NA,levels=taxas)
-  n_0=dim(bg)[1]
-  # Attribute likelihood weights
-  q_hashes = unique(c(occ$q_hash,bg$q_hash))
-  if(equalSizeCells){
-    for(qh in q_hashes){
-      inCell = bg$q_hash==qh
-      nInCell = sum(inCell)
-      bg$w[inCell] = (Bias_killer-1) / (n_0*Bias_killer*nInCell)
+## Draw a large set of points representing the whole geographic domain 
+draw.pts.in.cells = function(n,r_lofCells,originalVes,delta,dataDir,miniPerCell=1){
+  resX= (extent(r_lofCells)[2]-extent(r_lofCells)[1])/ncol(r_lofCells)
+  resY = (extent(r_lofCells)[4]-extent(r_lofCells)[3])/nrow(r_lofCells)
+  cellsCoo = coordinates(r_lofCells)
+  cellsCoo = cellsCoo[!is.na(getValues(r_lofCells)),]
+  
+  cellsIds = unique(getValues(r_lofCells))
+  cellsIds = cellsIds[!is.na(cellsIds)]
+  
+  q_hashes = expand.grid(1:n,cellsIds)[,2]
+  x=rep(0,length(cellsIds)*n)
+  y=rep(0,length(cellsIds)*n)
+  toReDraw = rep(T,length(cellsIds)*n)
+  Df = data.frame(q_hash = q_hashes,x_lamb93=NA,y_lamb93=NA,Longitude=NA,Latitude=NA)
+  for(i in 1:length(originalVes)){
+    eval(parse(text=paste('Df$',originalVes[i],'=NA',sep="")))
+  }
+  
+  while(sum(toReDraw)>0){
+    qLack = unique(q_hashes[toReDraw])
+    print(paste('Missing ',sum(toReDraw),' points over into',length(qLack),' cells'))
+    
+    for(i in 1:length(qLack)){
+      toFill = q_hashes==qLack[i] & toReDraw
+      nLack = sum(toFill)
+      
+      cd = cellsIds==qLack[i]
+      xmin = cellsCoo[cd,1]-resX/2+delta
+      xmax = cellsCoo[cd,1]+resX/2-delta
+      ymin = cellsCoo[cd,2]-resY/2+delta
+      ymax = cellsCoo[cd,2]+resY/2-delta
+      
+      x[toFill] = runif(nLack,xmin,xmax)
+      y[toFill] = runif(nLack,ymin,ymax)
+      
+      if(i/1000==round(i/1000)){
+        flush.console()
+        cat('    \r     Process...',100*i/length(qLack),'%       \r    ')
+      }
     }
-  }else{
-    print('Error: Non-equal cell size not implemented yet')
+    Df[toReDraw,c('x_lamb93')] = x[toReDraw] 
+    Df[toReDraw,c('y_lamb93')] = y[toReDraw] 
+    
+    
+    pts = SpatialPoints(Df[toReDraw,c('x_lamb93','y_lamb93')],proj4string = CRS("+proj=lcc +lat_1=49 +lat_2=44 +lat_0=46.5 +lon_0=3 +x_0=700000 +y_0=6600000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs "))
+    pts = spTransform(pts,CRSobj = CRS('+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs '))
+    Df[toReDraw,c('Longitude')] = pts@coords[,1]
+    Df[toReDraw,c('Latitude')]=pts@coords[,2]
+    
+    Df[toReDraw,originalVes] = get_variables(originalVes,Df[toReDraw,c('Longitude','Latitude')],dpath = dataDir,fix=F)[,originalVes]
+    # Points that having NA environmental variables must be redrawn
+    # until we have all required points
+    toReDraw = !complete.cases(Df)
+    qLack = unique(q_hashes[toReDraw])
+    for(i in 1:length(qLack)){
+      cd = q_hashes==qLack[i] & toReDraw
+      if(sum(cd)<=(n-miniPerCell)){
+        # We do NOT redraw points whose cells for
+        # which at least one background point have
+        # been drawn
+        toReDraw[cd] = F
+      }
+    }
+  }
+  Df$spht = get_spht(Df$clc)
+  return(Df)
+}
+
+# Get points coordinates of "Df" over their PCA axeses
+# It will include all PCA axeses until the sum of 
+# their Eigen values makes a proportion of "eigRatio" of the trace
+principal.axes.coordinates=function(matrixFormula,Df,d=NULL,eigRatio=NULL){
+  Des = model.matrix(matrixFormula,Df)
+  Des = Des[,2:dim(Des)[2]]
+  Des = scale(Des)
+  SVD = svd(Des)
+  if(is.null(d) & !is.null(eigRatio)){
+    d = 0
+    sumEig = 0
+    while(sumEig/sum(SVD$d)<eigRatio){
+      d = d+1
+      sumEig = sumEig + SVD$d[d]
+    }
+  }else if(is.null(d) & is.null(eigRatio)){
+    print('Error: either supply d or eigRatio')
     return(NULL)
   }
-  
-  # background output value is zero
-  bg$pseudo_y=0
-  n=NULL
-  occ$pseudo_y = NA
-  occ$w = NA
-  for(e in 1:length(taxas)){
-    sp = occ$taxa==taxas[e]
-    n = sum(sp)
-    occ$w[sp] = 1/(Bias_killer*n)
-    occ$pseudo_y[sp] = (Bias_killer*n)/1
-  }
-  # Bind occurrences and background points
-  # with a repetition of background points per species 
-  for(e in 1:length(taxas)){
-    bg$taxa=taxas[e]
-    occ=rbindlist(list(occ,bg))
-    if(e/20==round(e/20)){
-      flush.console()
-      cat('     \r    Process...',100*e/length(taxas),'%       \r')
-    }
-  }
-  if(length(factorCols)>0){
-    for(c in factorCols){
-      eval(parse(text=paste('occ$',c,'=factor(occ$',c,')',sep="")))
-    }
-  }
-  return(occ)
+  PAcoos = SVD$u[,1:d]
+  PAcoos = t(SVD$d[1:d] * t(PAcoos))
+  colnames(PAcoos)=paste('axe_',1:d,sep="")
+  PAcoos=data.frame(PAcoos)
+  return(PAcoos)
 }
 
-
-### Low memory + scalable wrapper of sparse.model.matrix 
-memFree.sparse.model.matrix= function(matrixFormu,Data,band=50000){
-  quo = dim(Data)[1] %/% band
-  res = dim(Data)[1] %% band
-  npass = quo+as.numeric(res>0)
-  store = data.frame(is=NA,js=NA,xs= NA)
-  store = store[-1,]
-  deb= Sys.time()
-  for(i in 1:npass){
-    if(i==npass & res>0){
-      tmp = Data[(1+(i-1)*band):dim(Data)[1],,drop=F]
-    }else{
-      tmp = Data[(1+(i-1)*band):(i*band),,drop=F]
-    }
-    
-    mTmp = sparse.model.matrix(matrixFormu,tmp)
-    mTmp = as(mTmp, "dgTMatrix")
-    store = rbindlist(list(store,data.frame(is=mTmp@i,js=mTmp@j,xs=mTmp@x)))
-    dur = Sys.time()-deb
-    gc(reset=T)
-    if(i/5==round(i/5)){
-      flush.console()
-      cat('\r     Process...',100*i/npass,' time elapsed:',dur,attr(dur,'units'),'       \r')
-    }
+# Approximate the total hyper-volume of the Alpha-confidence interval
+# envelope of given points as an ellipsoïde, with their coordinates
+# over the main inerty axeses of the ellipsoïde
+hyperVolume.from.PAcoos = function(PAcoos,Alpha){
+  axesLength = NULL
+  d = dim(PAcoos)[2]
+  for(di in 1:d){
+    quantiles = quantile(PAcoos[,di],c(0.5-Alpha/2,.5+Alpha/2),na.rm=T)
+    axesLength = c(axesLength,quantiles[2]-quantiles[1])
   }
-  BGf = sparseMatrix(i=store$is+1,j=store$js+1,x=store$xs,dims=c(dim(Data)[1],dim(mTmp)[2]))
-  colnames(BGf) = colnames(mTmp)
-  gc(reset=T)
-  return(BGf)
-}
-
-
-### Fit LOF (GLMNET version)
-# fit LOF model parameters to data with the glmnet package
-lof_glmnet=function(data,y,occupationString,weights=NULL,lambdaMinRatio=NULL,nlambda=100){
-  
-  glmnet.control(fdev=0,eps=1e-10)
-  # Reset with
-  #glmnet.control(factory = TRUE)
-  
-  if(is.null(weights)){weights=rep(1,dim(data)[1])}
-  
-  ntaxa = length(unique(data$taxa))
-  # Make design matrix
-  data$q_hash = factor(data$q_hash)
-  contrasts(data$q_hash) = contr.sum(length(levels(data$q_hash)))
-  
-  if(ntaxa>1){
-    matrixFormu = paste(' ~ q_hash + taxa * (',occupationString,')')
-  }else{
-    matrixFormu = paste(' ~ q_hash + ',occupationString)
-  }
-  matrixFormu = as.formula(matrixFormu)
-  SparseDes = memFree.sparse.model.matrix(matrixFormu,data,band=100000)
-  taxaItc= intersect( grep('taxa',colnames(SparseDes)) , grep('I(.*)',colnames(SparseDes),invert=T))
-  
-  # GLMNET formula
-  if(ntaxa>1){
-    formu = paste('pseudo_y ~ q_hash + taxa * (',occupationString,')')
-  }else{
-    formu = paste('pseudo_y ~ q_hash + ',occupationString)
-  }
-  formu = as.formula(formu )
-  
-  # Attribute penalties to groups of terms
-  coNa = colnames(SparseDes)
-  penaltyFactorsIdx = 0 * as.numeric(regexpr('(Intercept)',coNa)>0) + 1*as.numeric(regexpr('q_hash',coNa)>0) + 2*as.numeric(grepl('I\\((.*)\\)',coNa))
-  penaltyFactors = rep(1,length(penaltyFactorsIdx))                                                                         
-  penaltyFactors[penaltyFactorsIdx==0] = 1e-3
-  penaltyFactors[penaltyFactorsIdx==1] = 1
-  
-  # Fit model
-  if(is.null(lambdaMinRatio)){
-    lof.mod = glmnet(x=SparseDes,y=y,family="poisson",weights = weights,penalty.factor=penaltyFactors,nlambda = nlambda,standardize = T)
-  }else{
-    lof.mod = glmnet(x=SparseDes,y=y,family="poisson",weights = weights,penalty.factor=penaltyFactors,lambda.min.ratio = lambdaMinRatio,nlambda = nlambda,standardize = T)
-  }
-  
-  # Add q_hash contrasts detail
-  lof.mod$q_hashContrasts = contrasts(data$q_hash)
-  colnames(lof.mod$q_hashContrasts)=as.character(1:dim(contrasts(data$q_hash))[2])
-  
-  # Compute coefficients translation into "contr.treatment" 
-  Contr = lof.mod$q_hashContrasts
-  nQi = dim(Contr)[2]
-  nQ = dim(Contr)[1]
-  coefo = lof.mod$beta[,dim(lof.mod$beta)[2]]
-  coefo_qc = coefo[regexpr('q_hash',names(coefo))>0]
-  orderedIdx = sapply(1:nQi,function(k) which(paste('q_hash',k,sep="")==names(coefo_qc)) )
-  coefo_qc=coefo_qc[orderedIdx]
-  Qnames = rownames(Contr)
-  coefo_q = rep(NA,nQ)
-  names(coefo_q) = Qnames
-  for(qi in 1:nQ){
-    coefo_q[qi]= sum(Contr[qi,] * coefo_qc)
-  }
-  diffRef = 0-coefo_q[1]
-  coefo_q = coefo_q + diffRef
-  names(coefo_q)= paste('q_hash',names(coefo_q),sep="")
-  newCoefo = coefo[regexpr('q_hash',names(coefo))<=0]
-  newCoefo['(Intercept)'] = lof.mod$a0[length(lof.mod$a0)]-diffRef
-  newCoefo = c(newCoefo,coefo_q[2:length(coefo_q)])
-  lof.mod$coefficients = newCoefo
-  
-  return(lof.mod)
+  # We now approximate the Alpha-enveloppe volume
+  # of the whole domain with an ellipsoïd volume
+  Gamma = 1/ (exp(1)*dgamma(1,shape=(d/2)+1,scale=1) ) 
+  volume = prod(axesLength)* pi^(d/2) / Gamma 
+  return(volume)
 }
 
 # Mid effort
 mid = function(x){
-  0.9 * as.numeric(x<0 ) + 0.1
+ as.numeric(x<0 ) 
 }
 # Sigmo rapide
 SigmoFast = function(x){
   9* exp(-x*20)/(1+exp(-x*20)) + 1
 }
+
+# Sigmo rapide
+SigmoMedium = function(x){
+  9* exp(-x*5)/(1+exp(-x*5)) + 1
+}
+
+
 # Coline ecretee 
 scalpHill = function(x){
   1 + as.numeric(x<0)*3* exp((x+2)*20)/(1+exp((x+2)*20)) +  as.numeric(x>=0)*3* exp(-(x-2)*20)/(1+exp(-(x-2)*20))
@@ -529,6 +490,19 @@ load_variables=function(){
   variables[[6]]=c('clc')
   return(variables)
 }
+
+clc.groups = function(){
+  V1 = c("arti","semi_arti","arable","pasture",
+         "brl_for","coni_for","mixed_for","nat_grass",
+         "moors","sclero","transi_wood","no_veg",      
+         "coastal_area","ocean" )
+  liste = list( V1, list(c(1,10),c(2,3,4,6),
+  c(21,22),18,23,24,25,26, 27,28,29,
+  c(31,32),c(37,38,39,42,30),c( 44) ))
+  
+  return(liste)
+}
+
 
 # attribution des variables environnementales aux occurrences à partir d'un data.frame
 # où chaque ligne est une occurrence et sont présentes les colonnes "Longitude" et "Latitude" au format WGS84
@@ -781,9 +755,12 @@ get_variables = function(variables,table,dpath='C:/Users/Christophe/hubiC/Docume
 
 
 # Change land cover to spht := simplified plant habitat type = urban / arable / grasses / forest / other
-get_spht = function(clcVec){
-  setwd(paste('C:/Users/',user,'/pCloud local/0_These/data/MTAP article/data/',sep=""))
-  clc.variables = readRDS('clc.variables.RData')
+get_spht = function(clcVec,dir=NA){
+  if(!is.na(dir)){
+    setwd(dir)
+  }
+  clc.variables = clc.groups()
+
   names = clc.variables[[1]]
   
   spht = rep(NA,length(clcVec))
@@ -799,3 +776,406 @@ get_spht = function(clcVec){
   return(spht)
 }
 
+
+
+#####
+# LOF core
+#####
+
+
+# Duplicate and attach background points to data for LOF 
+# (i) Complete occurrences data.frame with given background points
+# duplicated into all species
+# (ii) compute weights and y
+bind.background.pts = function(occ,bg,factorCols=NULL,Bias_killer=100){
+  ### PRINT
+  print('check if na in occ lines')
+  print(paste('n lines without NAs:',sum(complete.cases(occ))))
+  
+  occ = occ[complete.cases(occ),]
+  occ$taxa = factor(occ$taxa)
+  taxas = levels(occ$taxa)
+  
+  q_hashes = union( as.character(unique(bg$q_hash)), as.character(unique(occ$q_hash)) )
+  occ$q_hash = factor(occ$q_hash,levels=q_hashes)
+  bg$q_hash = factor(bg$q_hash, levels=q_hashes)
+  ### PRINT
+  print('check taxas')
+  print(str(taxas))
+  print('check occ$taxa')
+  print(str(occ$taxa))
+  
+  # Compute WEIGHTS of background points 
+  # We assume here all cells have same area
+  nCell = length(q_hashes) 
+  bg$w= NA
+  q_hashCol= as.character(bg$q_hash)
+  for(qh in q_hashes){
+    inCell = q_hashCol==qh
+    nInCell = sum(inCell)
+    bg$w[inCell] = (Bias_killer-1) / (Bias_killer*nCell*nInCell)
+  }
+  
+  # background output value is zero
+  bg$pseudo_y=0
+  occ$pseudo_y = NA
+  occ$w = NA
+  TaxaCol = as.character(occ$taxa)
+  for(e in 1:length(taxas)){
+    sp = TaxaCol==taxas[e]
+    n_e = sum(sp)
+    if(is.na(n_e)){
+      print(taxas[e])
+      print(sum(sp))
+      print(sum(TaxaCol==as.character(taxas[e])))}
+    occ$w[sp] = 1/(Bias_killer*n_e)
+    occ$pseudo_y[sp] = (Bias_killer*n_e)/1
+  }
+  # Bind occurrences and background points
+  # with a repetition of background points per species 
+  for(e in 1:length(taxas)){
+    bg$taxa=factor(taxas[e],levels=taxas)
+    occ=rbindlist(list(occ,bg),use.names=T)
+    if(e/20==round(e/20)){
+      flush.console()
+      cat('     \r    Process...',100*e/length(taxas),'%       \r')
+    }
+  }
+  if(length(factorCols)>0){
+    for(c in factorCols){
+      eval(parse(text=paste('occ$',c,'=factor(occ$',c,')',sep="")))
+    }
+  }
+  return(occ)
+}
+
+### Low memory + scalable wrapper of sparse.model.matrix 
+memFree.sparse.model.matrix= function(matrixFormu,Data,band=50000){
+  quo = dim(Data)[1] %/% band
+  res = dim(Data)[1] %% band
+  npass = quo+as.numeric(res>0)
+  store = data.frame(is=NA,js=NA,xs= NA)
+  store = store[-1,]
+  deb= Sys.time()
+  for(i in 1:npass){
+    if(i==npass & res>0){
+      tmp = Data[(1+(i-1)*band):dim(Data)[1],,drop=F]
+    }else{
+      tmp = Data[(1+(i-1)*band):(i*band),,drop=F]
+    }
+    
+    mTmp = sparse.model.matrix(matrixFormu,tmp)
+    mTmp = as(mTmp, "dgTMatrix")
+    store = rbindlist(list(store,data.frame(is=mTmp@i+1+(i-1)*band,js=mTmp@j+1,xs=mTmp@x)))
+    dur = Sys.time()-deb
+    gc(reset=T)
+    if(i/5==round(i/5)){
+      flush.console()
+      cat('\r     Process...',100*i/npass,' time elapsed:',dur,attr(dur,'units'),'       \r')
+    }
+  }
+  BGf = sparseMatrix(i=store$is,j=store$js,x=store$xs,dims=c(dim(Data)[1],dim(mTmp)[2]))
+  colnames(BGf) = colnames(mTmp)
+  gc(reset=T)
+  return(BGf)
+}
+
+
+## Get treatment coefficients of q_hash
+get.treat.coef = function(lof.mod,wLambda=NULL){
+  if(is.null(wLambda)){wLambda=dim(lof.mod$beta)[2]}
+  Contr = lof.mod$q_hashContrasts
+  nQi = dim(Contr)[2]
+  nQ = dim(Contr)[1]
+  coefo = lof.mod$beta[,wLambda]
+  coefo_qc = coefo[regexpr('q_hash',names(coefo))>0]
+  orderedIdx = sapply(1:nQi,function(k) which(paste('q_hash',k,sep="")==names(coefo_qc)) )
+  coefo_qc=coefo_qc[orderedIdx]
+  Qnames = rownames(Contr)
+  coefo_q = rep(NA,nQ)
+  names(coefo_q) = Qnames
+  for(qi in 1:nQ){
+    coefo_q[qi]= sum(Contr[qi,] * coefo_qc)
+  }
+  diffRef = 0-coefo_q[1]
+  coefo_q = coefo_q + diffRef
+  names(coefo_q)= paste('q_hash',names(coefo_q),sep="")
+  newCoefo = coefo[regexpr('q_hash',names(coefo))<=0]
+  newCoefo['(Intercept)'] = lof.mod$a0[wLambda]-diffRef
+  
+  newCoefo = c(newCoefo,coefo_q[2:length(coefo_q)])
+  lof.mod$coefficients = newCoefo
+  return(lof.mod)
+}
+
+
+### Fit LOF (GLMNET version)
+# fit LOF model parameters to data with the glmnet package
+lof_glmnet=function(data,y,occupationString,weights=NULL,lambdaMinRatio=NULL,nlambda=100){
+  
+  glmnet.control(fdev=0,eps=1e-10)
+  # Reset with
+  #glmnet.control(factory = TRUE)
+  
+  if(is.null(weights)){weights=rep(1,dim(data)[1])}
+  
+  ntaxa = length(unique(data$taxa))
+  # Make design matrix
+  data$q_hash = factor(data$q_hash)
+  contrasts(data$q_hash) = contr.sum(length(levels(data$q_hash)))
+  
+  if(ntaxa>1){
+    matrixFormu = paste(' ~ q_hash + taxa * (',occupationString,')')
+  }else{
+    matrixFormu = paste(' ~ q_hash + ',occupationString)
+  }
+  matrixFormu = as.formula(matrixFormu)
+  print('make sparse model matrix')
+  SparseDes = memFree.sparse.model.matrix(matrixFormu,data,band=100000)
+  taxaItc= intersect( grep('taxa',colnames(SparseDes)) , grep('I(.*)',colnames(SparseDes),invert=T))
+  
+  # Attribute penalties to groups of terms
+  coNa = colnames(SparseDes)
+  penaltyFactorsIdx = 0 * as.numeric(regexpr('(Intercept)',coNa)>0) + 1*as.numeric(regexpr('q_hash',coNa)>0) + 2*as.numeric(grepl('I\\((.*)\\)',coNa))
+  penaltyFactors = rep(1,length(penaltyFactorsIdx))
+  penaltyFactors[penaltyFactorsIdx==0] = 1e-3 # Set relative penalty of intercept
+  penaltyFactors[penaltyFactorsIdx==1] = .1 # Set relative penalty of sampling effort
+  
+  # Fit model
+  print('call glmnet')
+  if(is.null(lambdaMinRatio)){
+    lof.mod = glmnet(x=SparseDes,y=y,family="poisson",weights = weights,penalty.factor=penaltyFactors,nlambda = nlambda)
+  }else{
+    lof.mod = glmnet(x=SparseDes,y=y,family="poisson",weights = weights,penalty.factor=penaltyFactors,lambda.min.ratio = lambdaMinRatio,nlambda = nlambda)
+  }
+  
+  # Add q_hash contrasts detail
+  lof.mod$q_hashContrasts = contrasts(data$q_hash)
+  colnames(lof.mod$q_hashContrasts)=as.character(1:dim(contrasts(data$q_hash))[2])
+  
+  # Compute coefficients translation into "contr.treatment" 
+  lof.mod =get.treat.coef(lof.mod) 
+  return(lof.mod)
+}
+
+
+### predict relative species intensity 
+predict.lof.spRelativeIntensity = function(coos,
+                                           model,
+                                           Intensityformula,
+                                           originalVes,
+                                           taxasToPredict,
+                                           glc19SpIdVec,
+                                           nOccPerSp = rep(dim(coos)[1],length(glc19SpId)),
+                                           extractorScript = "C:/Users/Christophe/pCloud local/Github/Run/all_functions.R",
+                                           dataDir="C:/Users/Christophe/pCloud local/data/"){
+  
+  # coos : numeric matrix with 2 columns named Longitude and Latitude (coordinates in the WGS84 system)
+  listVE = load_variables()
+  avail = NULL
+  for(i in 1:length(listVE)){avail =  c(avail,listVE[[i]])}
+  toGet = intersect(avail,originalVes)
+  
+  extra = setdiff(originalVes,avail)
+  if(length(extra)!=1 | extra!="spht"){
+    print('Error: Unknown environmental variables required in originalVes')
+    return(NULL)
+  }
+  coos = get_variables(toGet,coos,dpath = dataDir,fix=F)
+  if("clc"%in%toGet & length(extra)==1 & extra=="spht"){coos$spht = get_spht(coos$clc)
+  }else{print('Error: spht required whereas clc (original source of it) not in originalVes')}
+  
+  Mat = sparse.model.matrix(Intensityformula,data = coos)
+  predMatrix = matrix(NA,dim(Mat)[1],length(glc19SpIdVec))
+  colnames(predMatrix) = as.character(glc19SpIdVec)
+  
+  for(i in 1:length(glc19SpIdVec)){
+    Sp = glc19SpIdVec[i]
+    coefSp = coefficients[regexpr(Sp,names(coefficients))>0 & regexpr("q_hash",names(coefficients))<=0]
+    if(!is.null(coefSp)){
+      names(coefSp) = sub(paste('taxa',Sp,':(.*)',sep=""),'\\1',names(coefSp))
+      names(coefSp)[1] = '(Intercept)'
+      coefRef = coefficients[regexpr("taxa",names(coefficients))<=0 & regexpr("q_hash",names(coefficients))<=0]
+      coefSp = coefSp + coefRef
+    }else{
+      coefSp = coefficients[regexpr("taxa",names(coefficients))<=0 & regexpr("q_hash",names(coefficients))<=0]
+    }
+    
+    #matrixFormu = as.formula(" ~ etp + I(etp^2) + I(chbio_12-etp) + I((chbio_12-etp)^2) + chbio_1 + I(chbio_1^2) + chbio_5 + I(chbio_5^2) + alti + I(alti^2) + slope + I(slope^2) + awc_top + I(awc_top^2) + bs_top + I(bs_top^2) + spht + slope:I(chbio_12-etp)")
+    
+    pred = as.numeric(Mat %*% coefSp)
+    predMatrix[,i] = pred * nOccPerSp[i] / sum(pred)
+  }
+  
+  if(i/10 == round(i/10)){
+    flush.console()
+    cat('    \r     Process...',100*i/length(glc19SpIdVec),'%        \r')
+  }
+  
+  # /!\ predMatrix might have NA cells /!\ 
+  return(predMatrix)
+}
+
+
+
+
+### Get species Intensity coefficients
+# OK
+get.spIntensityCoefficients = function(SpName,coefficients,spList){
+  # SpName : character string, species identifier as in the model variable "taxa"
+  # coefficients: named numeric vector, the vector of all estimated coefficients of the model extracted through 
+  # the function 
+  # spList : character vector, all identifiers of species fitted in the model
+  coefSp = coefficients[regexpr(SpName,names(coefficients))>0 & regexpr("q_hash",names(coefficients))<=0]
+  if(length(coefSp)>0){
+    names(coefSp) = sub(paste('taxa',SpName,':(.*)',sep=""),'\\1',names(coefSp))
+    names(coefSp)[1] = '(Intercept)'
+    coefRef = coefficients[regexpr("taxa",names(coefficients))<=0 & regexpr("q_hash",names(coefficients))<=0]
+    coefSp = coefSp + coefRef
+  }else if(as.character(SpName) %in%as.character(spList)){
+    coefSp = coefficients[regexpr("taxa",names(coefficients))<=0 & regexpr("q_hash",names(coefficients))<=0]
+  }else{
+    print('Species not in the list')
+    return(NULL)
+  }
+  return(coefSp)
+}
+
+### predict relative species intensity 
+# OK
+predict.lof.spLogRelativeIntensity = function(coos,
+                                              coefficients,
+                                              Intensityformula,
+                                              originalVes,
+                                              taxasToPredict,
+                                              glc19SpIdVec,
+                                              nOccPerSp = rep(dim(coos)[1],length(glc19SpIdVec)),
+                                              extractorScript = "C:/Users/Christophe/pCloud local/0_These/Github/Run/all_functions.R",
+                                              dataDir="C:/Users/Christophe/pCloud local/0_These/data/"){
+  
+  # coos : numeric matrix with 2 columns named Longitude and Latitude (coordinates in the WGS84 system)
+  listVE = load_variables()
+  avail = NULL
+  for(i in 1:length(listVE)){avail =  c(avail,listVE[[i]])}
+  toGet = intersect(avail,originalVes)
+  
+  extra = setdiff(originalVes,avail)
+  if(length(extra)!=1 || extra!="spht"){
+    print('Error: Unknown environmental variables required in originalVes')
+    return(NULL)
+  }
+  coos = get_variables(toGet,coos,dpath = dataDir,fix=F)
+  if("clc"%in%toGet & length(extra)==1 & extra=="spht"){coos$spht = get_spht(coos$clc)
+  }else{print('Error: spht required whereas clc (original source of it) not in originalVes')}
+  
+  Mat = sparse.model.matrix(Intensityformula,data = coos)
+  
+  Matos = matrix(NA,dim(coos)[1],dim(Mat)[2])
+  Matos = data.frame(Matos)
+  Matos[complete.cases(coos),] = Mat
+  Mat = Matos 
+  Mat = as.matrix(Mat)
+  rm(Matos)
+  gc(reset=T)
+  predMatrix = matrix(NA,dim(Mat)[1],length(taxasToPredict))
+  colnames(predMatrix) = as.character(taxasToPredict)
+  
+  for(i in 1:length(taxasToPredict)){
+    Sp = taxasToPredict[i]
+    coefSp = get.spIntensityCoefficients(Sp,coefficients,spList=glc19SpIdVec)
+    pred = as.numeric(Mat %*% coefSp)
+    predMatrix[,i] = pred * nOccPerSp[i] / sum(pred,na.rm=T)
+    if(i/10 == round(i/10)){
+      flush.console()
+      cat('    \r     Process...',100*i/length(taxasToPredict),'%        \r')
+    }
+  }      
+  
+  # /!\ predMatrix might have NA cells /!\ 
+  return(predMatrix)
+}
+
+#####
+# MAXNET
+#####
+
+predict.maxnet.edit = function(mod,data,type="maxModel"){
+  if(type=="maxModel"){
+    terms <- sub("hinge\\((.*)\\):(.*):(.*)$", "hingeval(\\1,\\2,\\3)", 
+                 names(mod$betas))
+    terms <- sub("categorical\\((.*)\\):(.*)$", "categoricalval(\\1,'\\2')", 
+                 terms)
+    terms <- sub("thresholds\\((.*)\\):(.*)$", "thresholdval(\\1,\\2)", 
+                 terms)
+  }else if(type=="lofModel"){
+    terms = sub("spht(.*)","categoricalval(spht,'\\1')",names(mod$betas))
+  }
+  f <- formula(paste("~", paste(terms, collapse = " + "), "-1"))
+  D = sparse.model.matrix(f,data)
+  p = as.vector(D %*% mod$betas)
+  return(exp(p - mean(p)))
+}
+
+#####
+# Intensity map over France
+#####
+
+# OK
+create.french.departements.dataFrame= function(saveRdsFileDir,dptDir='C:/Users/Christophe/pCloud local/0_These/data/zones_administratives_fr/regions administratives/'){
+  library(rgdal)
+  
+  # Emplacement de l'archive décompressée, à remplacer par le votre
+  #adresse_communes_geofla = paste("C:/Users/",user,"/pCloud local/0_These/data/zones_administratives_fr/communes_geofla/GEOFLA_2-2_COMMUNE_SHP_LAMB93_FXX_2016-06-28/GEOFLA/1_DONNEES_LIVRAISON_2016-06-00236/GEOFLA_2-2_SHP_LAMB93_FR-ED161/COMMUNE",sep="")
+  #adresse_cantons_geofla = paste("C:/Users/",user,"/pCloud local/0_These/data/zones_administratives_fr/communes_geofla/GEOFLA_2-0_CANTON_SHP_LAMB93_FXX_2015-07-01/GEOFLA/1_DONNEES_LIVRAISON_2015/GEOFLA_2-0_SHP_LAMB93_FR-ED151/CANTON",sep="")
+  
+  # Description des données via orgInfo
+  # Attention à ne pas mettre l'extension à la fin du nom
+  setwd(dptDir)
+  ogrInfo(dsn = paste(dptDir,"departements-20180101.shp",sep=""),layer="departements-20180101")
+  reg <- readOGR(dsn = paste(dptDir,"departements-20180101.shp",sep=""),layer="departements-20180101", stringsAsFactors=FALSE)
+  toRm = c('FR940','FR920','FR910','FR930','<NA>')
+  reg = reg[!reg@data$nuts3%in%toRm,]
+  reg = reg[reg@data$nom!="Mayotte",]
+  regProj = spTransform(reg,CRSobj = CRS("+proj=lcc +lat_1=49 +lat_2=44 +lat_0=46.5 +lon_0=3 +x_0=700000 +y_0=6600000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs"))
+  
+  data = regProj@data
+  data$id = 1:dim(data)[1]
+  df = data[,c('id','code_insee')]
+  df$lon = NA
+  df$lat = NA
+  df = df[-1,]
+  for(i in 1:dim(regProj)[1]){
+    tmp = data[i,c('id','code_insee')]
+    coos = as.data.frame(regProj@polygons[[i]]@Polygons[[1]]@coords)
+    coos$id = i
+    tmp = merge(tmp,coos,by="id")
+    colnames(tmp)[3:4]=c('lon','lat')
+    df = rbind(df,tmp)
+  }
+  saveRDS(df,saveRdsFileDir)
+}
+
+
+map.spIntensity.over.France = function(pred,coos_l93,outFileLoc,dptFileLoc){
+  library(ggplot2)
+  
+  df = readRDS(dptFileLoc)
+  
+  classes = cut(pred,c(min(pred)-.1,quantile(pred,c(.1,.4,.6,.9)),max(pred)+.1),dig.lab=2)
+  colo = colorRampPalette(c("darkorchid4","goldenrod"))(length(unique(classes)))
+  lev= levels(classes)
+  
+  labels = paste(lev,paste('/ quantile',c('0 to .1','.1 to .4','.4 to .6','.6 to .9','.9 to 1')))
+  p = ggplot()+geom_polygon(data=df,aes(x=lon,y=lat,group=id),fill = NA,color = "grey20",size=.35)
+  p = p + geom_tile(data=coos_l93,aes(x=x_l93,y=y_l93,fill=classes),size=1,alpha=.8)+scale_fill_manual(values=colo,name="log10 of species intensity",labels=labels)+theme_bw()
+  p = p + xlab("Longitude in Lambert 93") + ylab("Latitude in Lambert 93")
+  p = p + theme(legend.title = element_text(size=18),
+                legend.text = element_text(size=15),
+                axis.title.x = element_text(size=18),
+                axis.title.y = element_text(size=18),
+                axis.text.x = element_text(size=13),
+                axis.text.y = element_text(size=13))
+  png(outFileLoc,width=1200,height=750)
+  print(p)
+  dev.off()
+}
