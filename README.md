@@ -16,8 +16,8 @@ Install librairies: glmnet, raster, ggplot2, data.table.
 ## Real data illustration
 
 ### Prerequisites
-0) Having a machine with >60Gb of RAM. Required by glmnet during the fitting process (otherwise decreasing the number of background points per sampling cell - variable __n__ in __plantnet_effort.R__ - will approximately reduce the memory consumption by the same factor, but may entail higher bias in the model fit, or even identifiability problems).
-1) Install librairies: glmnet, data.table, raster, rgdal, rgeos, grid, ggplot2.
+0) Having a machine with >60Gb of RAM (for model default settings). It's required to carry out the construction of the sparse model matrix and glmnet fitting process, and R will crash if there's not enough memory available. Decreasing the number of background points per sampling cell - variable __n__ in __plantnet_effort.R__ - will approximately reduce the memory consumption by the same factor, but may entail bias in the model fit, or even identifiability problems.
+1) Install librairies: glmnet, data.table, raster, rgdal, rgeos, grid, ggplot2, plyr.
 2) Download all the repository (zip file __SamplingEffort-master.zip__) and unzip the whole directory __SamplingEffort-master__ locally.
 3) Download the Pl@ntNet occurrences data:
 Botella Christophe, Bonnet Pierre, Joly Alexis, Lombardo Jean-Christophe, & Affouard Antoine. (2019). Pl@ntNet queries 2017-2018 in France (Version 0) [Data set]. Zenodo. http://doi.org/10.5281/zenodo.2634137
@@ -28,5 +28,5 @@ And unzip it inside the __SamplingEffort-master__ directory.
 
 ### Reproduce the model fit and graphs 
 1) Open script __plantnet_effort.R__ and modify the __dir__ variable to the location of the __SamplingEffort-master__ directory.
-2) Run __plantnet_effort.R__ with R. (It will take a while... Go for day hike. If it crashes during glmnet fit, the )
-3) 
+2) Run __plantnet_effort.R__ with R. (It will take a while... Go for day hike. If, for any reason, it crashes during glmnet fit, you may restart the script from the __Fit and save model__ section as the required temporary  have been stored on disk)
+3) The graphs illustrating the relative sampling effort, the species intensity and the species occurrences over France are saved as __.png__ images in the __SamplingEffort-master__ directory.
