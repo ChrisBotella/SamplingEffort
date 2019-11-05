@@ -455,7 +455,7 @@ for(param in paramsToPlot){
 
 globTol=0.003
 n_is = c(1000,1000)
-Qs=c(4,10,20,30,50,100)
+Qs=c(2,8,14,16)
 compteur=1
 for(Q in Qs){
   ## We define sampling cells with a raster
@@ -540,6 +540,57 @@ for(Q in Qs){
   saveRDS(I_betas,paste("_cellXP_Q_",Q,"_nFoc_",n_is[1],"_nStd_",n_is[2],"_I_betas",sep=""))  
   compteur = compteur+1
 }
+
+#####
+# Plot variance vs number of cells
+#####
+
+Qs =  c(4  ,10  ,20 , 30  ,50 ,100)
+toplot = data.frame(expand.grid(Q=Qs,
+                                param=c('beta_1_1', 'beta_1_2', 'beta_2_1', "beta_2_2"),
+                                variance=NA))
+
+setwd(saveDir)
+
+for(Q in Qs){
+  I_gammas=readRDS(paste("_cellXP_Q_",Q,"_nFoc_",n_is[1],"_nStd_",n_is[2],"_I_gammas",sep=""))
+  I_alphas=readRDS(paste("_cellXP_Q_",Q,"_nFoc_",n_is[1],"_nStd_",n_is[2],"_I_alphas",sep=""))  
+  I_gamma_alpha=readRDS(paste("_cellXP_Q_",Q,"_nFoc_",n_is[1],"_nStd_",n_is[2],"_I_gamma_alpha",sep=""))  
+  I_gamma_beta=readRDS(paste("_cellXP_Q_",Q,"_nFoc_",n_is[1],"_nStd_",n_is[2],"_I_gamma_beta",sep=""))  
+  I_betas=readRDS(paste("_cellXP_Q_",Q,"_nFoc_",n_is[1],"_nStd_",n_is[2],"_I_betas",sep=""))  
+  
+  I = build.Information.Matrix(I_gammas,I_alphas,I_gamma_alpha,I_betas,I_beta_alpha,I_gamma_beta)
+  
+  Eigen = svd(I[-1,-1])
+  conditionNumber = Eigen$d[1]/Eigen$d[length(Eigen$d)]
+  print(paste("Condition number:",conditionNumber))
+  if(conditionNumber<1e7){
+    print('Ok')
+    Sigma = solve(I[-1,-1])
+    Names = colnames(Sigma)
+    cd = toplot$Q==Q
+    toplot$variance[cd & toplot$param=='beta_1_1'] = Sigma[Names=='beta_1',Names=='beta_1'][1,1]
+    toplot$variance[cd & toplot$param=='beta_1_2'] = Sigma[Names=='beta_1',Names=='beta_1'][2,2]
+    toplot$variance[cd & toplot$param=='beta_2_1'] = Sigma[Names=='beta_2',Names=='beta_2'][1,1]
+    toplot$variance[cd & toplot$param=='beta_2_2'] = Sigma[Names=='beta_2',Names=='beta_2'][2,2]
+  }
+}
+
+toplot$variance[toplot$variance<0] = NA
+toplot$variance[toplot$Q==50 & toplot$param=="beta_1_1"] = NA
+write.table(toplot,"toplot_cellXP_Bisp_cutNice.csv",sep=";",row.names=F,col.names=T)
+
+maxQ = max(toplot$Q[!is.na(toplot$variance)])
+toplot = toplot[toplot$Q<=20,]
+paramsToPlot = unique(as.character(toplot$param))
+for(param in paramsToPlot){
+  cd = toplot$param==param
+  pl=ggplot()+geom_line(data=toplot[cd,],aes(x=Q,y=variance),size=1)+theme_bw()+ggtitle(paste(param," variance vs number of sampling cells"))+xlab("Number of sampling cells")+ylab('Estimation variance')+scale_y_continuous(limits=c(0,max(toplot$variance,na.rm=T)))
+  png(paste("_cellXP_",param,'_Bisp_cutNice.png',sep=""),width=600,height=400)
+  print(pl)
+  dev.off()
+}
+
 
 #####
 # Compute density error metric
