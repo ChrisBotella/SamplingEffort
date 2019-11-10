@@ -205,7 +205,6 @@ build.Information.Matrix = function(I_gammas,I_alphas,I_gamma_alpha,I_betas,I_be
   return(I)
 }
 
-
 #####
 # Define intensity components
 #####
@@ -238,34 +237,39 @@ cells = raster(nrows=1,ncols=Q, ext= extent(D@bbox) )
 cells[] = sampEff( rasterToPoints(cells)[,c(1,2)] )
 plot(cells) # Plot sampling effort
 
+# make cells polygons 
+cell_polygons = list()
+for(j in 1:Q){ 
+  cells[]=F
+  cells[j]=T
+  # Convert to sp object
+  spdf <- as(cells, "SpatialPolygonsDataFrame")
+  cell_polygons[[j]] <- spdf[rowSums(spdf@data) == 1, ]
+}
+
 # Define species 
 mus = c(-2.5,2.5)
 sigs = c(1.6,1.6)
+N = length(mus)
 gaussianNiche = function(x,mu,sig,alpha){
   return(alpha * exp(- (x-mu)^2/(2*sig^2)))
 }
 
 globTol = .003
-saveDir="C:/Users/Christophe/pCloud local/0_These/data/LOF data/19_11_04 variance test/"
+saveDir="C:/Users/user/pCloud local/0_These/data/LOF data/19_11_04 variance test/"
 
 ######
 # Effect of the number of occurrences
 ######
+toCompute = data.frame(nFoc = c(100,250,500,750,1000,1250,1500,rep(100,7)),
+                                nStd = c(rep(100,7),100,250,500,750,1000,1250,1500))
+for(i in 1:dim(toCompute)[1]){
+    n_is = c(toCompute$nFoc[i],toCompute$nStd[i])
+    print(paste('Step ',i ,' over ',dim(toCompute)[1]))
 
-nFocs= c(100,250,500,750,1000,1250,1500)
-nStds = nFocs
-compteur=1
-for(nFoc in nFocs){
-  for(nStd in nStds){
-    n_is = c(nFoc,nStd)
-    print(paste('Step ',compteur ,' over ',length(nFocs)*length(nStds)))
-    # Species densities 
-    N = length(mus)
-    alphas = NULL
-    for(i in 1:N){
-      fTmp = function(zz){sampEff(zz) * gaussianNiche(x(zz),mus[i],sigs[i],1)}
-      alphas[i] = n_is[i] / integrateOver(fTmp, D,globTol,verbose = F)
-    }
+    ### Species densities 
+    # Compute species intensity multiplying constants 
+    alphas = Compute.AlphasFromN(n_is,mus,sigs,tol = globTol)
     
     ## We build species intensity functions as elements of a list of size N 
     Lambda = list()
@@ -288,31 +292,12 @@ for(nFoc in nFocs){
       toCrossBeta[[i]]= eval(parse(text=paste( "function(z){x_features(z)*sampEff(z)*as.numeric(Lambda[[",i,"]](x(z)))}" ,sep="")))
     }
     
-    #####
-    # Compute Fisher Information Matrix elements 
-    #####
-    
-    # make cells polygons 
-    cell_polygons = list()
-    for(j in 1:Q){ 
-      cells[]=F
-      cells[j]=T
-      # Convert to sp object
-      spdf <- as(cells, "SpatialPolygonsDataFrame")
-      cell_polygons[[j]] <- spdf[rowSums(spdf@data) == 1, ]
-    }
-    
     # We build the matrix of dimensions Q * N
     # where the component of row j and col i is
     # LateX:
     # I(\gamma_j,\alpha_i) = \int_{cell_j} s(z) \lambda^i(x(z))dz
     # It is the cross information of cell j parameter and species i intercept 
-    I_gamma_alpha = matrix(NA,Q,N)
-    for(j in 1:Q){
-      for(i in 1:N){
-        I_gamma_alpha[j,i] = integrateOver( SampEffLambda[[i]] , cell_polygons[[j]] ,tolerance = globTol,verbose=F )
-      }
-    }
+    I_gamma_alpha = Compute.I_gamma_alpha(SampEffLambda,cell_polygons,tol = globTol)
     
     ## We compute the information associated with each sampling cell parameter
     # LateX:
@@ -328,122 +313,107 @@ for(nFoc in nFocs){
     # We compute the cross information between cell j parameter and species i density parameter vector \beta_i
     # LateX:
     # I(\gamma_j,\beta_i) = \int_{c_j} x^i(z) s(z) \lambda^i(x^i(z)) dz
-    I_gamma_beta = array(NA,dim=c(Q,N,p))
-    
-    for(j in 1:Q){
-      for(i in 1:N){
-        I_gamma_beta[j,i,] = integrateOverMultivariate( toCrossBeta[[i]] , cell_polygons[[j]] ,tolerance = globTol,verbose=F )
-      }
-    }
+    I_gamma_beta = Compute.I_gamma_beta(CrossBetaFuns = toCrossBeta,cellPolygons = cell_polygons,p=p,tol = globTol,verbose = F)
     
     # We now just have to sum the previous ones over cells to get the 
     # cross information of species i intercept \alpha_i and species i density parameter vector \beta_i 
     # LateX:
     # I(\beta_i,\alpha_i) = \int_D x^i(z) s(z) \lambda^i(x^i(z)) dz
     I_beta_alpha = matrix(NA,p,N)
-    for(i in 1:N){
-      I_beta_alpha[,i] = rowSums(t(I_gamma_beta[,i,]))
-    }
+    for(i in 1:N){I_beta_alpha[,i] = rowSums(t(I_gamma_beta[,i,]))}
     
     # We compute the information matrix of density parameters for each species
     # LateX:
     # I(\beta_i) = \int_D x(z)x^T(z) s(z) \lambda^i(x(z)) dz
-    I_betas = list()
-    
-    AD = gArea(D)  
-    ElemBand = 100
-    rep = 5
-    for(i in 1:N){
-      coefOfVariation = 1
-      k=0
-      zz = NULL
-      while(coefOfVariation>globTol){
-        k=k+1
-        if(length(zz)==0){
-          zz= spsample(D, rep*ElemBand,type = "random")@coords
-        }else{
-          zz = rbind(zz,spsample(D,rep*ElemBand,type = "random")@coords)
-        }
-        
-        Matrices = list()
-        for(l in 1:rep){
-          cd = (1+(l-1)*k*ElemBand):(l*k*ElemBand)
-          Matrices[[l]] = AD * t(x_features(zz[cd,]) * sampEff(zz[cd,]) * as.numeric(Lambda[[i]](x(zz[cd,])))) %*% x_features(zz[cd,]) / (k*ElemBand)
-        }
-        
-        Mv = NULL
-        SDv = NULL
-        for(m in 1:(p^2)){
-          Mv[m] = mean( sapply( 1:rep, function(l) as.vector(Matrices[[l]])[m] ) )
-          SDv[m] = sd( sapply( 1:rep, function(l) as.vector(Matrices[[l]])[m] ) )
-        }
-        
-        coefOfVariations = rep(NA,length(Mv))
-        coefOfVariations[Mv==0] = 0
-        coefOfVariations[Mv!=0] = SDv[Mv!=0]/Mv[Mv!=0]
-        coefOfVariation= max(coefOfVariations)
-      }
-      
-      I_betas[[i]] = matrix( Mv , p , p)
-    }
+    I_betas = Compute.I_betas(D,sampEff,Lambda,x_features,p=p,tol=globTol,verb=T)
     
     setwd(saveDir)
-    saveRDS(I_gammas,paste("Q_",Q,"_nFoc_",nFoc,"_nStd_",nStd,"_I_gammas",sep=""))
-    saveRDS(I_alphas,paste("Q_",Q,"_nFoc_",nFoc,"_nStd_",nStd,"_I_alphas",sep=""))  
-    saveRDS(I_gamma_alpha,paste("Q_",Q,"_nFoc_",nFoc,"_nStd_",nStd,"_I_gamma_alpha",sep=""))  
-    saveRDS(I_gamma_beta,paste("Q_",Q,"_nFoc_",nFoc,"_nStd_",nStd,"_I_gamma_beta",sep=""))  
-    saveRDS(I_betas,paste("Q_",Q,"_nFoc_",nFoc,"_nStd_",nStd,"_I_betas",sep=""))  
-    compteur = compteur+1
-  }
+    saveRDS(I_gammas,paste("Q_",Q,"_nFoc_",n_is[1],"_nStd_",n_is[2],"_I_gammas",sep=""))
+    saveRDS(I_alphas,paste("Q_",Q,"_nFoc_",n_is[1],"_nStd_",n_is[2],"_I_alphas",sep=""))  
+    saveRDS(I_gamma_alpha,paste("Q_",Q,"_nFoc_",n_is[1],"_nStd_",n_is[2],"_I_gamma_alpha",sep=""))  
+    saveRDS(I_gamma_beta,paste("Q_",Q,"_nFoc_",n_is[1],"_nStd_",n_is[2],"_I_gamma_beta",sep=""))  
+    saveRDS(I_betas,paste("Q_",Q,"_nFoc_",n_is[1],"_nStd_",n_is[2],"_I_betas",sep=""))  
 }
 
 #####
 # Plot variance vs number of occurrences
 #####
 
-nOccu = nFocs
+toplot = toCompute
+toplot$curve= c(rep("nSp2=100 & nSp1 grows",7),rep("nSp1=100 & nSp2 grows",7)) 
+toplot$variance=NA
+
 Q = 10
+toplot$nOccu = NA
+cd= toplot$curve=="nSp1=100 & nSp2 grows"
+toplot$nOccu[cd] = toplot$nStd[cd]
+cd = toplot$curve=="nSp2=100 & nSp1 grows"
+toplot$nOccu[cd] = toplot$nFoc[cd]
 paramsToPlot = c('beta_1_1','beta_1_2','beta_2_1','beta_2_2')
-toplot = data.frame(expand.grid(nOcc = nOccu,
-                                curve=c("nFoc=100 & nStd grows","nStd=100 & nFoc grows"),
-                                param=paramsToPlot,
-                                variance=NA))
+
+tmp = expand.grid(id=1:dim(toplot)[1], param=paramsToPlot)
+toplot = cbind(toplot[tmp$id,],data.frame(param=tmp$param))
+
+toplot=toplot[,c('nOccu','curve','param','variance')]
+
+## Add constrain on Sp2
+addCurves = c(rep("nSp1=100 & nSp2 grows & Sp2 parameters known",14),rep("nSp2=100 & nSp1 grows & Sp2 parameters known",14))
+cd= toplot$curve%in%c("nSp1=100 & nSp2 grows","nSp2=100 & nSp1 grows") & toplot$param%in%c('beta_1_1','beta_1_2')
+tmp = toplot[cd,]
+tmp = tmp[order(tmp$curve),]
+print(tmp)
+tmp$curve = addCurves
+
+toplot = rbind(toplot,tmp)
+cpte = unique(toplot[,c('nOccu','curve','variance')])
+print(cpte)
+
+#toplot = data.frame(expand.grid(nOcc = nOccu,curve=c("nFoc=100 & nStd grows","nStd=100 & nFoc grows"),param=paramsToPlot,variance=NA))
 setwd(saveDir)
-for(curve in c("nFoc=100 & nStd grows","nStd=100 & nFoc grows")){
+for(i in 1:dim(cpte)[1]){
+  print(cpte[i,,drop=F])
+  if(regexpr('nSp1=',cpte$curve[i])>0){nFoc=100;nStd=cpte$nOccu[i]}else{nFoc=cpte$nOccu[i];nStd=100}
+  I_gammas=readRDS(paste("Q_",Q,"_nFoc_",nFoc,"_nStd_",nStd,"_I_gammas",sep=""))
+  I_alphas=readRDS(paste("Q_",Q,"_nFoc_",nFoc,"_nStd_",nStd,"_I_alphas",sep=""))  
+  I_gamma_alpha=readRDS(paste("Q_",Q,"_nFoc_",nFoc,"_nStd_",nStd,"_I_gamma_alpha",sep=""))  
+  I_gamma_beta=readRDS(paste("Q_",Q,"_nFoc_",nFoc,"_nStd_",nStd,"_I_gamma_beta",sep=""))  
+  I_betas=readRDS(paste("Q_",Q,"_nFoc_",nFoc,"_nStd_",nStd,"_I_betas",sep=""))  
   
-  for(n in nOccu){
-    if(regexpr('nFoc=',curve)>0){nFoc=100;nStd=n}else{nFoc=n;nStd=100}
-    I_gammas=readRDS(paste("Q_",Q,"_nFoc_",nFoc,"_nStd_",nStd,"_I_gammas",sep=""))
-    I_alphas=readRDS(paste("Q_",Q,"_nFoc_",nFoc,"_nStd_",nStd,"_I_alphas",sep=""))  
-    I_gamma_alpha=readRDS(paste("Q_",Q,"_nFoc_",nFoc,"_nStd_",nStd,"_I_gamma_alpha",sep=""))  
-    I_gamma_beta=readRDS(paste("Q_",Q,"_nFoc_",nFoc,"_nStd_",nStd,"_I_gamma_beta",sep=""))  
-    I_betas=readRDS(paste("Q_",Q,"_nFoc_",nFoc,"_nStd_",nStd,"_I_betas",sep=""))  
-    
-    I = build.Information.Matrix(I_gammas,I_alphas,I_gamma_alpha,I_betas,I_beta_alpha,I_gamma_beta)
-    
-    Eigen = svd(I[-1,-1])
-    conditionNumber = Eigen$d[1]/Eigen$d[length(Eigen$d)]
-    print(paste("Condition number:",conditionNumber))
-    if(conditionNumber<1e6){
-      print('Ok')
-      Sigma = solve(I[-1,-1])
-    }
-    
-    Names = colnames(Sigma)
-    cd = toplot$nOcc==n & toplot$curve==curve
-    toplot$variance[cd & toplot$param=='beta_1_1'] = Sigma[Names=='beta_1',Names=='beta_1'][1,1]
-    toplot$variance[cd & toplot$param=='beta_1_2'] = Sigma[Names=='beta_1',Names=='beta_1'][2,2]
+  I = build.Information.Matrix(I_gammas,I_alphas,I_gamma_alpha,I_betas,I_beta_alpha,I_gamma_beta)
+  
+  Names = colnames(I)[2:dim(I)[2]]
+  
+  cdPar = regexpr('parameters known',cpte$curve[i])>0
+  if(cdPar){
+    cdtmp = Names!='beta_2'
+    I = I[cdtmp,cdtmp]
+    Names= Names[cdtmp]
+  }
+  
+  Eigen = svd(I[-1,-1])
+  conditionNumber = Eigen$d[1]/Eigen$d[length(Eigen$d)]
+  print(paste("Condition number:",conditionNumber))
+  if(conditionNumber<1e6){
+    print('Ok')
+    Sigma = solve(I[-1,-1])
+  }
+  
+  cd = toplot$nOccu==cpte$nOccu[i] & toplot$curve==cpte$curve[i]
+  toplot$variance[cd & toplot$param=='beta_1_1'] = Sigma[Names=='beta_1',Names=='beta_1'][1,1]
+  toplot$variance[cd & toplot$param=='beta_1_2'] = Sigma[Names=='beta_1',Names=='beta_1'][2,2]
+  if(!cdPar){
     toplot$variance[cd & toplot$param=='beta_2_1'] = Sigma[Names=='beta_2',Names=='beta_2'][1,1]
     toplot$variance[cd & toplot$param=='beta_2_2'] = Sigma[Names=='beta_2',Names=='beta_2'][2,2]
   }
 }
-
 write.table(toplot,"toplot_Q_10_Bisp_cutNice.csv",sep=";",row.names=F,col.names=T)
+
 tmp = toplot
 toplot = toplot[toplot$nOcc!=1500,]
+toplot$curve=factor(toplot$curve)
 for(param in paramsToPlot){
   cd = toplot$param==param
-  pl=ggplot()+geom_line(data=toplot[cd,],aes(x=nOcc,y=variance,group=curve,colour=curve),size=2)+theme_bw()+scale_y_continuous(limits=c(0,max(toplot$variance[cd])))+ggtitle(paste(param," variance vs number of occurrences"))+xlab("Number of occurrences")+ylab('Estimation variance')
+  pl=ggplot()+geom_line(data=toplot[cd,],aes(x=nOccu,y=variance,group=curve,colour=curve),size=2)+theme_bw()+scale_y_continuous(limits=c(0,max(toplot$variance[cd])))+ggtitle(paste(param," variance vs number of occurrences"))+xlab("Number of occurrences")+ylab('Estimation variance')+theme(legend.position = "none")
   png(paste("Q_10_",param,'_Bisp_cutNice.png',sep=""),width=600,height=400)
   print(pl)
   dev.off()
@@ -460,7 +430,7 @@ compteur=1
 for(Q in Qs){
   ## We define sampling cells with a raster
   cells = raster(nrows=1,ncols=Q, ext= extent(D@bbox) )
-
+  
   # make cells polygons 
   cell_polygons = list()
   for(j in 1:Q){ 
@@ -601,7 +571,7 @@ for(param in paramsToPlot){
 #####
 # Plot
 #####
- 
+
 
 #####
 # Bin
