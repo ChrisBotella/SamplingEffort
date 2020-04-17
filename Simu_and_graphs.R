@@ -113,7 +113,7 @@ nrep = 2 # Number of repetitions per (sampling,species) model configurations
 # True effort
 trueEffort = as.character(
   expand.grid(1:nrep,
-              c('mid','cutNice','cutHurts'))[,2])  
+              c('mid','cutHurts','SigmoMedium'))[,2])  
 
 # Pool of virtual species to simulate
 spGroup = c( rep('Bisp', length(trueEffort)) )  
@@ -122,7 +122,7 @@ effortClass = c( rep('histo_glmnet',length(trueEffort)))
 # mesh 
 mesh = c(rep(10,length(trueEffort)))
 # nb of points to draw 
-nnn = c(rep(400000,length(trueEffort)))
+nnn = c(rep(200000,length(trueEffort)))
 
 Sched = data.frame( id=1:length(spGroup),
                     spGroup=spGroup,
