@@ -491,19 +491,6 @@ load_variables=function(){
   return(variables)
 }
 
-clc.groups = function(){
-  V1 = c("arti","semi_arti","arable","pasture",
-         "brl_for","coni_for","mixed_for","nat_grass",
-         "moors","sclero","transi_wood","no_veg",      
-         "coastal_area","ocean" )
-  liste = list( V1, list(c(1,10),c(2,3,4,6),
-  c(21,22),18,23,24,25,26, 27,28,29,
-  c(31,32),c(37,38,39,42,30),c( 44) ))
-  
-  return(liste)
-}
-
-
 # attribution des variables environnementales aux occurrences à partir d'un data.frame
 # où chaque ligne est une occurrence et sont présentes les colonnes "Longitude" et "Latitude" au format WGS84
 get_variables = function(variables,table,dpath='C:/Users/Christophe/hubiC/Documents/0_These/data/',d_NA=2000,fix=T){
@@ -755,12 +742,8 @@ get_variables = function(variables,table,dpath='C:/Users/Christophe/hubiC/Docume
 
 
 # Change land cover to spht := simplified plant habitat type = urban / arable / grasses / forest / other
-get_spht = function(clcVec,dir=NA){
-  if(!is.na(dir)){
-    setwd(dir)
-  }
-  clc.variables = clc.groups()
-
+get_spht = function(clcVec,clcVariablesDir='C:/Users/admbotella/Documents/pCloud local/boulot/Github/SamplingEffort/'){
+  clc.variables = readRDS(paste(clcVariablesDir,'clc.variables.RData',sep=""))
   names = clc.variables[[1]]
   
   spht = rep(NA,length(clcVec))
@@ -1022,10 +1005,6 @@ predict.lof.spRelativeIntensity = function(coos,
 ### Get species Intensity coefficients
 # OK
 get.spIntensityCoefficients = function(SpName,coefficients,spList){
-  # SpName : character string, species identifier as in the model variable "taxa"
-  # coefficients: named numeric vector, the vector of all estimated coefficients of the model extracted through 
-  # the function 
-  # spList : character vector, all identifiers of species fitted in the model
   coefSp = coefficients[regexpr(SpName,names(coefficients))>0 & regexpr("q_hash",names(coefficients))<=0]
   if(length(coefSp)>0){
     names(coefSp) = sub(paste('taxa',SpName,':(.*)',sep=""),'\\1',names(coefSp))
@@ -1034,9 +1013,6 @@ get.spIntensityCoefficients = function(SpName,coefficients,spList){
     coefSp = coefSp + coefRef
   }else if(as.character(SpName) %in%as.character(spList)){
     coefSp = coefficients[regexpr("taxa",names(coefficients))<=0 & regexpr("q_hash",names(coefficients))<=0]
-  }else{
-    print('Species not in the list')
-    return(NULL)
   }
   return(coefSp)
 }
@@ -1093,27 +1069,6 @@ predict.lof.spLogRelativeIntensity = function(coos,
   
   # /!\ predMatrix might have NA cells /!\ 
   return(predMatrix)
-}
-
-#####
-# MAXNET
-#####
-
-predict.maxnet.edit = function(mod,data,type="maxModel"){
-  if(type=="maxModel"){
-    terms <- sub("hinge\\((.*)\\):(.*):(.*)$", "hingeval(\\1,\\2,\\3)", 
-                 names(mod$betas))
-    terms <- sub("categorical\\((.*)\\):(.*)$", "categoricalval(\\1,'\\2')", 
-                 terms)
-    terms <- sub("thresholds\\((.*)\\):(.*)$", "thresholdval(\\1,\\2)", 
-                 terms)
-  }else if(type=="lofModel"){
-    terms = sub("spht(.*)","categoricalval(spht,'\\1')",names(mod$betas))
-  }
-  f <- formula(paste("~", paste(terms, collapse = " + "), "-1"))
-  D = sparse.model.matrix(f,data)
-  p = as.vector(D %*% mod$betas)
-  return(exp(p - mean(p)))
 }
 
 #####
